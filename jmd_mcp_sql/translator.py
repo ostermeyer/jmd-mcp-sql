@@ -29,10 +29,16 @@ class SQLTranslator:
     def query(self, jmd_source: str) -> str:
         doc = JMDQueryParser().parse(jmd_source)
         table = self._resolve_or_error(doc.label)
-        filters = doc.filters if hasattr(doc, "filters") else {}
+
+        filters = {}
+        for f in doc.fields:
+            cond = f.condition
+            if cond.op == "=" and cond.values:
+                filters[f.key] = cond.values[0]
+            # TODO: support >, <, >= etc. as needed
 
         where, params = self._build_where(filters)
-        sql = f"SELECT * FROM {table.name}"
+        sql = f'SELECT * FROM "{table.name}"'
         if where:
             sql += f" WHERE {where}"
 
@@ -49,7 +55,7 @@ class SQLTranslator:
         table = self._resolve_or_error(label)
 
         where, params = self._build_where(data)
-        sql = f"SELECT * FROM {table.name}"
+        sql = f'SELECT * FROM "{table.name}"'
         if where:
             sql += f" WHERE {where}"
 
@@ -75,7 +81,7 @@ class SQLTranslator:
         col_names = ", ".join(cols)
         values = [data[c] for c in cols]
 
-        sql = f"INSERT OR REPLACE INTO {table.name} ({col_names}) VALUES ({placeholders})"
+        sql = f'INSERT OR REPLACE INTO "{table.name}" ({col_names}) VALUES ({placeholders})'
         cur = self._conn.execute(sql, values)
         self._conn.commit()
 
@@ -102,7 +108,7 @@ class SQLTranslator:
                               "message": "Delete requires at least one identifier field"},
                              label="Error")
 
-        sql = f"DELETE FROM {table.name} WHERE {where}"
+        sql = f'DELETE FROM "{table.name}" WHERE {where}'
         cur = self._conn.execute(sql, params)
         self._conn.commit()
 

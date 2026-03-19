@@ -48,7 +48,7 @@ class SchemaInspector:
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         result = {}
         for (table_name,) in cur.fetchall():
-            cur.execute(f"PRAGMA table_info({table_name})")
+            cur.execute(f'PRAGMA table_info("{table_name}")')
             columns = [
                 ColumnInfo(
                     name=row[1],
