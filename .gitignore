@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+jmd_mcp_sql/northwind.db

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jmd-mcp-sql"
+version = "0.1.0"
+description = "JMD-based MCP server for SQLite — natural language database interface"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Andreas Ostermeyer", email = "andreas@ostermeyer.de" }]
+requires-python = ">=3.10"
+keywords = ["jmd", "mcp", "sqlite", "llm", "natural-language", "database"]
+dependencies = [
+    "mcp>=1.0",
+    "jmd-format>=0.3",
+]
+
+[project.urls]
+Homepage = "https://github.com/ostermeyer/jmd-spec"
+Repository = "https://github.com/ostermeyer/jmd-mcp-sql"
+
+[project.scripts]
+jmd-mcp-sql = "jmd_mcp_sql.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["jmd_mcp_sql*"]
