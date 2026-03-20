@@ -20,32 +20,22 @@ def _t() -> SQLTranslator:
 
 
 @mcp.tool()
-def query(document: str) -> str:
-    """Query records using a JMD query document (#? Label).
-
-    The document uses Query-by-Example syntax: field values act as filters.
-    Omitted fields match any value. Returns all matching records.
-
-    Example:
-        #? Order
-        status: pending
-    """
-    try:
-        return _t().query(document)
-    except Exception as e:
-        return f"# Error\nstatus: 400\ncode: query_failed\nmessage: {e}"
-
-
-@mcp.tool()
 def read(document: str) -> str:
-    """Read one or more records using a JMD data document (# Label).
+    """Read records from the database using a JMD document.
 
-    Provide identifying fields to look up specific records.
-    Returns a single record or a list if multiple match.
+    Accepts two document modes:
 
-    Example:
+    Data document (# Label): look up records by exact field values.
+    Returns a single record if exactly one matches, a list otherwise.
+
         # Order
         id: 42
+
+    Query-by-Example document (#? Label): filter records by field values.
+    Omitted fields match any value. Always returns a list.
+
+        #? Order
+        status: pending
     """
     try:
         return _t().read(document)

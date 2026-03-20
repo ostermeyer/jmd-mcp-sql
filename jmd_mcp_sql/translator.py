@@ -4,7 +4,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from jmd import JMDParser, JMDQueryParser, JMDDeleteParser, serialize, tokenize
+from jmd import JMDParser, JMDQueryParser, JMDDeleteParser, serialize, tokenize, jmd_mode
 from .schema import SchemaInspector, TableInfo
 
 
@@ -28,33 +28,14 @@ class SQLTranslator:
         self._schema = SchemaInspector(conn)
 
     # ------------------------------------------------------------------
-    # query — #? Label\nfield: value  →  SELECT … WHERE …
-    # ------------------------------------------------------------------
-
-    def query(self, jmd_source: str) -> str:
-        doc = JMDQueryParser().parse(jmd_source)
-        table = self._resolve_or_error(doc.label)
-
-        filters = {}
-        for f in doc.fields:
-            cond = f.condition
-            if cond.op == "=" and cond.values:
-                filters[f.key] = cond.values[0]
-            # TODO: support >, <, >= etc. as needed
-
-        where, params = self._build_where(filters)
-        sql = f'SELECT * FROM "{table.name}"'
-        if where:
-            sql += f" WHERE {where}"
-
-        rows = self._fetchall(sql, params)
-        return _rows_to_jmd(rows, doc.label)
-
-    # ------------------------------------------------------------------
-    # read — # Label\nid: 42  →  SELECT … WHERE pk = ?
+    # read — # Label\nid: 42        →  SELECT … WHERE (exact match)
+    #         #? Label\nfield: val  →  SELECT … WHERE (QBE filters)
     # ------------------------------------------------------------------
 
     def read(self, jmd_source: str) -> str:
+        if jmd_mode(jmd_source) == "query":
+            return self._query(jmd_source)
+
         data = JMDParser().parse(jmd_source)
         label = self._label_from_source(jmd_source)
         table = self._resolve_or_error(label)
@@ -71,6 +52,24 @@ class SQLTranslator:
         if len(rows) == 1:
             return _row_to_jmd(rows[0], label)
         return _rows_to_jmd(rows, label)
+
+    def _query(self, jmd_source: str) -> str:
+        doc = JMDQueryParser().parse(jmd_source)
+        table = self._resolve_or_error(doc.label)
+
+        filters = {}
+        for f in doc.fields:
+            cond = f.condition
+            if cond.op == "=" and cond.values:
+                filters[f.key] = cond.values[0]
+
+        where, params = self._build_where(filters)
+        sql = f'SELECT * FROM "{table.name}"'
+        if where:
+            sql += f" WHERE {where}"
+
+        rows = self._fetchall(sql, params)
+        return _rows_to_jmd(rows, doc.label)
 
     # ------------------------------------------------------------------
     # write — # Label\nfield: value  →  INSERT OR REPLACE INTO …

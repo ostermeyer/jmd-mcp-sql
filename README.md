@@ -1,17 +1,18 @@
 # jmd-mcp-sql
 
-MCP server that exposes a SQLite database through four JMD tools — a natural language database interface for LLM-driven workflows.
+MCP server that exposes a SQLite database through three JMD tools — a natural language database interface for LLM-driven workflows.
 
 ## Tools
 
 | Tool | JMD mode | SQL |
 |------|----------|-----|
-| `query` | `#?` Query | SELECT with filters |
-| `read` | `#` Data | SELECT by identifier |
+| `read` | `#` Data or `#?` Query | SELECT by identifier or with filters |
 | `write` | `#` Data | INSERT OR REPLACE |
 | `delete` | `#-` Delete | DELETE WHERE |
 
 All inputs and outputs are JMD documents. The LLM speaks JMD — no SQL required.
+
+`read` accepts both a data document (`# Label`) for exact lookups and a Query-by-Example document (`#? Label`) for filtered queries. The document mode determines the behaviour.
 
 ## Installation
 
@@ -56,16 +57,16 @@ Or use the Northwind demo (no argument needed):
 
 ### Tool examples
 
-**Query with filters:**
-```
-#? Order
-status: pending
-```
-
 **Read by ID:**
 ```
 # Customer
 CustomerID: ALFKI
+```
+
+**Read with filters (Query-by-Example):**
+```
+#? Order
+status: pending
 ```
 
 **Write (insert or update):**
