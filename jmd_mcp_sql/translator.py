@@ -1,6 +1,7 @@
 """JMD document → SQL translation."""
 from __future__ import annotations
 
+import hashlib
 import re
 import sqlite3
 from typing import Any
@@ -37,6 +38,8 @@ def _sqlite_type_to_jmd(sqlite_type: str) -> str:
         return "float"
     if "BOOL" in t:
         return "boolean"
+    if "BLOB" in t:
+        return "binary"
     return "string"  # SQLite default affinity
 
 
@@ -344,7 +347,14 @@ class SQLTranslator:
 
     def _fetchall(self, sql: str, params: list) -> list[dict]:
         cur = self._conn.execute(sql, params)
-        return [dict(row) for row in cur.fetchall()]
+        rows = []
+        for row in cur.fetchall():
+            d = dict(row)
+            for k, v in d.items():
+                if isinstance(v, (bytes, bytearray)):
+                    d[k] = "sha256:" + hashlib.sha256(v).hexdigest()
+            rows.append(d)
+        return rows
 
     def _label_from_source(self, source: str) -> str:
         for line in tokenize(source):
