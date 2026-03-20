@@ -33,7 +33,7 @@ def _sqlite_type_to_jmd(sqlite_type: str) -> str:
         return "integer"
     if any(s in t for s in ("TEXT", "CHAR", "CLOB")):
         return "string"
-    if any(s in t for s in ("REAL", "FLOA", "DOUB")):
+    if any(s in t for s in ("REAL", "FLOA", "DOUB", "NUMER", "DECIM")):
         return "float"
     if "BOOL" in t:
         return "boolean"
