@@ -1,7 +1,6 @@
 """JMD document → SQL translation."""
 from __future__ import annotations
 
-import hashlib
 import re
 import sqlite3
 from typing import Any
@@ -347,14 +346,7 @@ class SQLTranslator:
 
     def _fetchall(self, sql: str, params: list) -> list[dict]:
         cur = self._conn.execute(sql, params)
-        rows = []
-        for row in cur.fetchall():
-            d = dict(row)
-            for k, v in d.items():
-                if isinstance(v, (bytes, bytearray)):
-                    d[k] = "sha256:" + hashlib.sha256(v).hexdigest()
-            rows.append(d)
-        return rows
+        return [dict(row) for row in cur.fetchall()]
 
     def _label_from_source(self, source: str) -> str:
         for line in tokenize(source):
