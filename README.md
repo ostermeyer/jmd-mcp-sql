@@ -4,15 +4,15 @@ MCP server that exposes a SQLite database through three JMD tools — a natural 
 
 ## Tools
 
-| Tool | JMD mode | SQL |
-|------|----------|-----|
-| `read` | `#` Data or `#?` Query | SELECT by identifier or with filters |
-| `write` | `#` Data | INSERT OR REPLACE |
-| `delete` | `#-` Delete | DELETE WHERE |
+| Tool | `#` Data | `#?` Query | `#!` Schema | `#-` Delete |
+| ------ | ---------- | ------------ | ------------- | ------------- |
+| `read` | SELECT by fields | SELECT with filters | PRAGMA (describe table) | — |
+| `write` | INSERT OR REPLACE | — | CREATE / ALTER TABLE | — |
+| `delete` | — | — | DROP TABLE | DELETE WHERE |
 
 All inputs and outputs are JMD documents. The LLM speaks JMD — no SQL required.
 
-`read` accepts both a data document (`# Label`) for exact lookups and a Query-by-Example document (`#? Label`) for filtered queries. The document mode determines the behaviour.
+The document mode determines what each tool does: data (`#`), query (`#?`), schema (`#!`), or delete (`#-`).
 
 ## Installation
 
@@ -58,19 +58,22 @@ Or use the Northwind demo (no argument needed):
 ### Tool examples
 
 **Read by ID:**
-```
+
+```text
 # Customer
 CustomerID: ALFKI
 ```
 
 **Read with filters (Query-by-Example):**
-```
+
+```text
 #? Order
 status: pending
 ```
 
 **Write (insert or update):**
-```
+
+```text
 # Order
 OrderID: 99999
 CustomerID: ALFKI
@@ -78,7 +81,8 @@ status: shipped
 ```
 
 **Delete:**
-```
+
+```text
 #- Order
 OrderID: 99999
 ```

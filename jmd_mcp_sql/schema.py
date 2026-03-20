@@ -16,6 +16,7 @@ class ColumnInfo:
 @dataclass
 class TableInfo:
     name: str
+    is_view: bool = False
     columns: list[ColumnInfo] = field(default_factory=list)
 
     @property
@@ -50,9 +51,13 @@ class SchemaInspector:
 
     def _load(self) -> dict[str, TableInfo]:
         cur = self._conn.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        cur.execute("""
+            SELECT name, type FROM sqlite_master
+            WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'
+            ORDER BY name
+        """)
         result = {}
-        for (table_name,) in cur.fetchall():
+        for (table_name, obj_type) in cur.fetchall():
             cur.execute(f'PRAGMA table_info("{table_name}")')
             columns = [
                 ColumnInfo(
@@ -63,5 +68,9 @@ class SchemaInspector:
                 )
                 for row in cur.fetchall()
             ]
-            result[table_name] = TableInfo(name=table_name, columns=columns)
+            result[table_name] = TableInfo(
+                name=table_name,
+                is_view=(obj_type == "view"),
+                columns=columns,
+            )
         return result

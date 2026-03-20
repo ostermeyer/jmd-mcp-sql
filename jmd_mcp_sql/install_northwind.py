@@ -17,7 +17,7 @@ def install() -> None:
         print(f"Northwind database already installed at {DEST}")
         return
 
-    print(f"Downloading Northwind database…")
+    print("Downloading Northwind database…")
     urllib.request.urlretrieve(NORTHWIND_SQL_URL, DEST)
 
     # Verify it's a valid SQLite file

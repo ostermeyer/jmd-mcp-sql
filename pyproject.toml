@@ -26,3 +26,6 @@ jmd-mcp-sql = "jmd_mcp_sql.server:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["jmd_mcp_sql*"]
+
+[tool.mypy]
+mypy_path = "../jmd-impl"
