@@ -36,8 +36,13 @@ class SchemaInspector:
     def resolve(self, label: str) -> TableInfo | None:
         """Map a JMD document label to a table (case-insensitive, singular/plural)."""
         tables = self.tables()
-        candidates = [label, label.lower(), label + "s", label.lower() + "s",
-                      label.rstrip("s"), label.lower().rstrip("s")]
+        singular = label[:-1] if label.endswith("s") and len(label) > 1 else None
+        singular_lower = label.lower()[:-1] if label.lower().endswith("s") and len(label) > 1 else None
+        candidates = [
+            label, label.lower(),
+            label + "s", label.lower() + "s",
+            *(([singular, singular_lower]) if singular else []),
+        ]
         for name in candidates:
             if name in tables:
                 return tables[name]

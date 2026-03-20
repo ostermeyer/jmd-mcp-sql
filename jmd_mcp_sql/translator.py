@@ -4,8 +4,13 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from jmd import JMDParser, JMDQueryParser, JMDDeleteParser, serialize
+from jmd import JMDParser, JMDQueryParser, JMDDeleteParser, serialize, tokenize
 from .schema import SchemaInspector, TableInfo
+
+
+def _quote_identifier(name: str) -> str:
+    """Quote a SQL identifier (column or table name) per SQLite rules."""
+    return '"' + name.replace('"', '""') + '"'
 
 
 def _row_to_jmd(row: dict[str, Any], label: str) -> str:
@@ -78,7 +83,7 @@ class SQLTranslator:
 
         cols = list(data.keys())
         placeholders = ", ".join("?" * len(cols))
-        col_names = ", ".join(cols)
+        col_names = ", ".join(_quote_identifier(c) for c in cols)
         values = [data[c] for c in cols]
 
         sql = f'INSERT OR REPLACE INTO "{table.name}" ({col_names}) VALUES ({placeholders})'
@@ -87,7 +92,7 @@ class SQLTranslator:
 
         rowid = cur.lastrowid
         row = self._conn.execute(
-            f"SELECT * FROM {table.name} WHERE rowid = ?", (rowid,)
+            f'SELECT * FROM "{table.name}" WHERE rowid = ?', (rowid,)
         ).fetchone()
         result = dict(row) if row else data
         return _row_to_jmd(result, label)
@@ -128,7 +133,7 @@ class SQLTranslator:
     def _build_where(self, filters: dict[str, Any]) -> tuple[str, list]:
         if not filters:
             return "", []
-        clauses = [f"{k} = ?" for k in filters]
+        clauses = [f"{_quote_identifier(k)} = ?" for k in filters]
         return " AND ".join(clauses), list(filters.values())
 
     def _fetchall(self, sql: str, params: list) -> list[dict]:
@@ -136,8 +141,11 @@ class SQLTranslator:
         return [dict(row) for row in cur.fetchall()]
 
     def _label_from_source(self, source: str) -> str:
-        for line in source.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                return stripped.lstrip("#").strip()
+        for line in tokenize(source):
+            if line.heading_depth == 1:
+                content = line.content
+                for prefix in ("? ", "! ", "- "):
+                    if content.startswith(prefix):
+                        return content[len(prefix):]
+                return content
         return "Result"
