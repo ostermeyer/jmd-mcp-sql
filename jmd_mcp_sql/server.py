@@ -26,6 +26,7 @@ import argparse
 import sqlite3
 from pathlib import Path
 
+from jmd import serialize
 from mcp.server.fastmcp import FastMCP
 
 from .translator import SQLTranslator
@@ -206,7 +207,10 @@ def read(document: str) -> str:
     try:
         return _t().read(document)
     except Exception as e:
-        return f"# Error\nstatus: 400\ncode: read_failed\nmessage: {e}"
+        return serialize(
+            {"status": 400, "code": "read_failed", "message": str(e)},
+            label="Error",
+        )
 
 
 @mcp.tool()
@@ -234,7 +238,10 @@ def write(document: str) -> str:
     try:
         return _t().write(document)
     except Exception as e:
-        return f"# Error\nstatus: 400\ncode: write_failed\nmessage: {e}"
+        return serialize(
+            {"status": 400, "code": "write_failed", "message": str(e)},
+            label="Error",
+        )
 
 
 @mcp.tool()
@@ -255,7 +262,10 @@ def delete(document: str) -> str:
     try:
         return _t().delete(document)
     except Exception as e:
-        return f"# Error\nstatus: 400\ncode: delete_failed\nmessage: {e}"
+        return serialize(
+            {"status": 400, "code": "delete_failed", "message": str(e)},
+            label="Error",
+        )
 
 
 def main() -> None:

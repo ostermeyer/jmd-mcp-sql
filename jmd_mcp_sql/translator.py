@@ -282,9 +282,17 @@ class SQLTranslator:
         label = self._label_from_source(jmd_source)
         table = self._resolve_or_error(label)
 
+        table_cols = {c.name for c in table.columns}
+        unknown = [k for k in data if k not in table_cols]
+        if unknown:
+            return serialize(
+                {"status": 400, "code": "bad_request",
+                 "message": f"Unknown column(s) {unknown!r} in table '{table.name}'"},
+                label="Error",
+            )
         where, params = self._build_where(data)
-        base_sql = f'SELECT * FROM "{table.name}"'
-        count_sql = f'SELECT COUNT(*) FROM "{table.name}"'
+        base_sql = f'SELECT * FROM {_quote_identifier(table.name)}'
+        count_sql = f'SELECT COUNT(*) FROM {_quote_identifier(table.name)}'
         if where:
             base_sql += f" WHERE {where}"
             count_sql += f" WHERE {where}"
@@ -334,7 +342,8 @@ class SQLTranslator:
         table = self._resolve_or_error(doc.label)
 
         # Translate each QueryField into a SQL WHERE fragment.
-        where, params = self._build_where_from_fields(doc.fields)
+        table_cols = {c.name for c in table.columns}
+        where, params = self._build_where_from_fields(doc.fields, table_cols)
 
         # Aggregation mode: any of group/sum/avg/min/max present in frontmatter.
         if "group" in fm or any(k in fm for k in _AGG_FUNCS):
@@ -397,6 +406,14 @@ class SQLTranslator:
             )
 
         cols = list(data.keys())
+        table_cols = {c.name for c in table.columns}
+        unknown = [c for c in cols if c not in table_cols]
+        if unknown:
+            return serialize(
+                {"status": 400, "code": "bad_request",
+                 "message": f"Unknown column(s) {unknown!r} in table '{table.name}'"},
+                label="Error",
+            )
         placeholders = ", ".join("?" * len(cols))
         col_names = ", ".join(_quote_identifier(c) for c in cols)
         values = [data[c] for c in cols]
@@ -405,7 +422,7 @@ class SQLTranslator:
         # statement.  SQLite replaces a row when a UNIQUE or PRIMARY KEY
         # constraint would otherwise be violated.
         sql = (
-            f'INSERT OR REPLACE INTO "{table.name}"'
+            f'INSERT OR REPLACE INTO {_quote_identifier(table.name)}'
             f" ({col_names}) VALUES ({placeholders})"
         )
         cur = self._conn.execute(sql, values)
@@ -415,7 +432,8 @@ class SQLTranslator:
         # state (including any DEFAULT values or computed columns).
         rowid = cur.lastrowid
         row = self._conn.execute(
-            f'SELECT * FROM "{table.name}" WHERE rowid = ?', (rowid,)
+            f'SELECT * FROM {_quote_identifier(table.name)} WHERE rowid = ?',
+            (rowid,),
         ).fetchone()
         result = dict(row) if row else data
         return _row_to_jmd(result, label)
@@ -451,6 +469,14 @@ class SQLTranslator:
             )
 
         identifiers = doc.identifiers if isinstance(doc.identifiers, dict) else {}
+        table_cols = {c.name for c in table.columns}
+        unknown = [k for k in identifiers if k not in table_cols]
+        if unknown:
+            return serialize(
+                {"status": 400, "code": "bad_request",
+                 "message": f"Unknown column(s) {unknown!r} in table '{table.name}'"},
+                label="Error",
+            )
         where, params = self._build_where(identifiers)
 
         # Require at least one filter to prevent accidental full-table deletes.
@@ -461,7 +487,7 @@ class SQLTranslator:
                 label="Error",
             )
 
-        sql = f'DELETE FROM "{table.name}" WHERE {where}'
+        sql = f'DELETE FROM {_quote_identifier(table.name)} WHERE {where}'
         cur = self._conn.execute(sql, params)
         self._conn.commit()
         return serialize(
@@ -543,15 +569,15 @@ class SQLTranslator:
             # removing columns requires recreating the table.
             existing_cols = {c.name for c in existing.columns}
             added = []
-            for f in scalar_fields:
-                if f.key not in existing_cols:
-                    sqlite_type = _JMD_TO_SQLITE.get(f.base_type.lower(), "TEXT")
-                    self._conn.execute(
-                        f"ALTER TABLE {_quote_identifier(table_name)}"
-                        f" ADD COLUMN {_quote_identifier(f.key)} {sqlite_type}"
-                    )
-                    added.append(f.key)
-            self._conn.commit()
+            with self._conn:
+                for f in scalar_fields:
+                    if f.key not in existing_cols:
+                        sqlite_type = _JMD_TO_SQLITE.get(f.base_type.lower(), "TEXT")
+                        self._conn.execute(
+                            f"ALTER TABLE {_quote_identifier(table_name)}"
+                            f" ADD COLUMN {_quote_identifier(f.key)} {sqlite_type}"
+                        )
+                        added.append(f.key)
             self._schema = SchemaInspector(self._conn)
             return serialize(
                 {"table": table_name, "altered": True, "added": added},
@@ -562,13 +588,19 @@ class SQLTranslator:
         """Drop a table or view from the database."""
         label = self._label_from_source(jmd_source)
         table = self._schema.resolve(label)
-        if table is not None and table.is_view:
+        if table is None:
+            return serialize(
+                {"status": 404, "code": "not_found",
+                 "message": f"Table '{label}' does not exist"},
+                label="Error",
+            )
+        if table.is_view:
             self._conn.execute(
                 f"DROP VIEW IF EXISTS {_quote_identifier(table.name)}"
             )
         else:
             self._conn.execute(
-                f"DROP TABLE IF EXISTS {_quote_identifier(label)}"
+                f"DROP TABLE IF EXISTS {_quote_identifier(table.name)}"
             )
         self._conn.commit()
         # Invalidate the cache after any DDL operation.
@@ -783,7 +815,7 @@ class SQLTranslator:
         return " AND ".join(clauses), list(filters.values())
 
     def _build_where_from_fields(
-        self, fields: list[Any]
+        self, fields: list[Any], table_cols: set[str]
     ) -> tuple[str, list]:
         """Build a WHERE clause from a list of QueryField nodes (query mode).
 
@@ -792,6 +824,11 @@ class SQLTranslator:
         filter condition map directly to SQL predicates; the others
         represent projection or nested structure which flat SQL cannot
         express and are silently skipped.
+
+        Args:
+            fields: Parsed query fields from JMDQueryParser.
+            table_cols: Valid column names for the target table.  Filter
+                fields referencing unknown columns raise ValueError.
         """
         clauses: list[str] = []
         params: list[Any] = []
@@ -800,6 +837,12 @@ class SQLTranslator:
                 continue  # QueryObject/QueryArray: no SQL equivalent
             if f.condition.op in ("?", "?:"):
                 continue  # Projection marker — selects columns, not rows
+            if f.key not in table_cols:
+                available = ", ".join(sorted(table_cols))
+                raise ValueError(
+                    f"Unknown column '{f.key}' in query filter. "
+                    f"Available: {available}"
+                )
             clause, p = self._condition_to_sql(f.key, f.condition)
             if clause:
                 clauses.append(clause)
