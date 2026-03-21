@@ -4,4 +4,7 @@ __pycache__/
 dist/
 build/
 .eggs/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
 jmd_mcp_sql/northwind.db

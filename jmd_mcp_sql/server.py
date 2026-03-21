@@ -1,4 +1,25 @@
-"""JMD MCP server for SQLite."""
+"""JMD MCP server for SQLite.
+
+This module wires together the MCP framework (FastMCP), the SQL translator,
+and the database connection.  It exposes three tools that an LLM can call:
+
+    read   — query records, filter with QBE, or describe table schemas
+    write  — insert/replace records or create/extend tables
+    delete — remove records or drop tables
+
+The server can be started against any SQLite database file by passing its
+path as a command-line argument.  When no argument is given, it uses the
+bundled Northwind demo database, creating it automatically from the SQL
+dump (``northwind.sql``) on the first run.
+
+Usage::
+
+    # Against a custom database
+    python -m jmd_mcp_sql.server /path/to/mydb.db
+
+    # Against the Northwind demo
+    python -m jmd_mcp_sql.server
+"""
 from __future__ import annotations
 
 import argparse
@@ -117,11 +138,17 @@ All tools return a `# Error` document on failure:
 Check the `code` field to decide how to proceed.
 """
 
+# Global FastMCP instance.  Tool functions are registered via @mcp.tool()
+# decorators below and become available to the MCP host on connection.
 mcp = FastMCP("jmd-mcp-sql", instructions=_INSTRUCTIONS)
+
+# Set by main() before mcp.run(); None while the module is imported without
+# a running server (e.g. during tests or type-checking).
 _translator: SQLTranslator | None = None
 
 
 def _t() -> SQLTranslator:
+    """Return the active SQLTranslator, raising if the server is not running."""
     if _translator is None:
         raise RuntimeError("Server not initialized — call main() first")
     return _translator
@@ -204,9 +231,14 @@ def delete(document: str) -> str:
 
 
 def main() -> None:
+    """Entry point: parse arguments, open the database, and start the server."""
     parser = argparse.ArgumentParser(description="JMD MCP server for SQLite")
-    parser.add_argument("db", nargs="?", default=None,
-                        help="Path to SQLite database file (default: Northwind demo)")
+    parser.add_argument(
+        "db",
+        nargs="?",
+        default=None,
+        help="Path to SQLite database file (default: Northwind demo)",
+    )
     args = parser.parse_args()
 
     if args.db:
@@ -216,18 +248,21 @@ def main() -> None:
     else:
         db_path = Path(__file__).parent / "northwind.db"
         if not db_path.exists():
+            # The demo database ships as a plain-text SQL dump.  Create the
+            # binary .db from it on first run and reuse it on subsequent runs.
             sql_path = Path(__file__).parent / "northwind.sql"
             if not sql_path.exists():
                 raise SystemExit(
                     "Northwind demo database not found. "
                     "northwind.sql is missing from the jmd_mcp_sql/ package directory."
                 )
-            import sqlite3 as _sqlite3
-            _conn = _sqlite3.connect(str(db_path))
-            _conn.executescript(sql_path.read_text(encoding="utf-8"))
-            _conn.close()
+            conn = sqlite3.connect(str(db_path))
+            conn.executescript(sql_path.read_text(encoding="utf-8"))
+            conn.close()
 
     global _translator
+    # check_same_thread=False is safe here because FastMCP processes one
+    # request at a time over stdio; there is no concurrent access.
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     _translator = SQLTranslator(conn)
 
