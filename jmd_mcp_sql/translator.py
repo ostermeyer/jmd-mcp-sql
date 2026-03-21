@@ -629,9 +629,29 @@ class SQLTranslator:
         ``order:`` accepts comma-separated ``<column> [asc|desc]`` pairs
         referencing any result column (grouping key or aggregate alias).
 
+        All field references are validated against the table schema before
+        any SQL is generated.  Unknown fields raise a ``ValueError`` which
+        the caller converts to a ``# Error`` document.
+
         Pagination via ``size:`` / ``page:`` is applied to the aggregated
         result set using a subquery COUNT.
         """
+        # ----------------------------------------------------------------
+        # Validation: every user-supplied field name must exist in the
+        # table before we interpolate it into SQL.  This prevents SQLite's
+        # silent "unknown quoted identifier → string literal" fallback,
+        # which would produce nonsense results without any error.
+        # ----------------------------------------------------------------
+        table_cols = {c.name for c in table.columns}
+
+        def _require_table_col(field: str, context: str) -> None:
+            if field not in table_cols:
+                available = ", ".join(sorted(table_cols))
+                raise ValueError(
+                    f"Unknown column '{field}' in '{context}' for table "
+                    f"'{table.name}'. Available columns: {available}"
+                )
+
         select_parts: list[str] = []
         group_cols: list[str] = []
 
@@ -639,6 +659,7 @@ class SQLTranslator:
             for col in str(fm["group"]).split(","):
                 col = col.strip()
                 if col:
+                    _require_table_col(col, "group")
                     group_cols.append(col)
                     select_parts.append(_quote_identifier(col))
 
@@ -652,6 +673,7 @@ class SQLTranslator:
                 col = col.strip()
                 if not col:
                     continue
+                _require_table_col(col, func)
                 alias = f"{func}_{col}"
                 select_parts.append(
                     f"{func.upper()}({_quote_identifier(col)})"
@@ -660,6 +682,20 @@ class SQLTranslator:
 
         if not select_parts:
             select_parts = ["COUNT(*) AS count"]
+
+        # Result columns: grouping keys + aggregate aliases + count.
+        # Used to validate order/having references, which must name a
+        # result column, not an underlying table column.
+        result_cols: set[str] = set(group_cols)
+        if "count" in fm:
+            result_cols.add("count")
+        for func in _AGG_FUNCS:
+            if func not in fm:
+                continue
+            for col in str(fm[func]).split(","):
+                col = col.strip()
+                if col:
+                    result_cols.add(f"{func}_{col}")
 
         select_clause = ", ".join(select_parts)
         sql = f'SELECT {select_clause} FROM {_quote_identifier(table.name)}'
@@ -678,6 +714,13 @@ class SQLTranslator:
                 parsed = _parse_comparison(raw.strip())
                 if parsed:
                     clause, val = parsed
+                    # Validate the column name in the having condition.
+                    having_col = clause.split()[0]
+                    if having_col not in result_cols:
+                        raise ValueError(
+                            f"Unknown result column '{having_col}' in "
+                            f"'having'. Available: {', '.join(sorted(result_cols))}"
+                        )
                     having_clauses.append(clause)
                     having_params.append(val)
         if having_clauses:
@@ -690,6 +733,11 @@ class SQLTranslator:
                 if not parts:
                     continue
                 col = parts[0]
+                if col not in result_cols:
+                    raise ValueError(
+                        f"Unknown result column '{col}' in 'order'. "
+                        f"Available: {', '.join(sorted(result_cols))}"
+                    )
                 direction = parts[1].upper() if len(parts) > 1 else "ASC"
                 if direction not in ("ASC", "DESC"):
                     direction = "ASC"
