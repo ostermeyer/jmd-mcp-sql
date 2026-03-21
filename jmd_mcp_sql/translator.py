@@ -47,8 +47,27 @@ Frontmatter lines *before* the heading pass control parameters:
     #? Orders
 
 The translator runs two queries: COUNT(*) for metadata, then SELECT
-with LIMIT/OFFSET for the page.  Results are wrapped in a JMD document
-with ``total``, ``page``, ``pages``, and ``page_size`` fields.
+with LIMIT/OFFSET for the page.  Pagination metadata (``total``,
+``page``, ``pages``, ``page_size``) is returned as response frontmatter
+— before the root heading — not as body fields.
+
+Aggregation
+-----------
+Aggregation is also expressed as frontmatter before the ``#?`` heading:
+
+    group: EmployeeID
+    sum: revenue
+    order: sum_revenue desc
+    size: 3
+
+    #? OrderDetails
+
+Supported keys: ``group`` (GROUP BY), ``sum``, ``avg``, ``min``,
+``max`` (aggregate functions), ``count`` (COUNT(*)), ``having``
+(post-aggregation filter, comma-separated conditions), ``order``
+(ORDER BY, comma-separated columns with optional direction).
+Result columns for aggregate functions are named ``<func>_<field>``
+(e.g. ``sum_revenue``, ``avg_UnitPrice``).
 """
 from __future__ import annotations
 
@@ -72,6 +91,43 @@ from jmd import (
 from jmd._query import Condition, QueryField
 
 from .schema import SchemaInspector, TableInfo
+
+
+# Aggregate function names recognised in query frontmatter.
+_AGG_FUNCS: tuple[str, ...] = ("sum", "avg", "min", "max")
+
+
+def _parse_comparison(condition: str) -> tuple[str, Any] | None:
+    """Parse a bare comparison string into a parameterized SQL fragment.
+
+    Used to translate ``having:`` frontmatter conditions such as
+    ``sum_Freight > 1000`` into ``('sum_Freight > ?', 1000)``.
+    Only column names matching ``[A-Za-z_][A-Za-z0-9_]*`` are accepted
+    to prevent SQL injection through crafted alias names.
+
+    Args:
+        condition: A string like ``"count > 5"`` or ``"avg_Price <= 99"``.
+
+    Returns:
+        A ``(sql_fragment, value)`` tuple, or ``None`` if the condition
+        cannot be parsed.
+    """
+    for op in (">=", "<=", ">", "<", "="):
+        if op in condition:
+            left, _, right = condition.partition(op)
+            col = left.strip()
+            val_str = right.strip()
+            if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', col):
+                return None
+            try:
+                val: Any = int(val_str)
+            except ValueError:
+                try:
+                    val = float(val_str)
+                except ValueError:
+                    val = val_str
+            return f"{col} {op} ?", val
+    return None
 
 
 def _regexp(pattern: str, value: Any) -> bool:
@@ -244,16 +300,11 @@ class SQLTranslator:
         if page_size > 0:
             page = max(1, int(fm.get("page", 1)))
             total = self._conn.execute(count_sql, params).fetchone()[0]
-            pages = (total + page_size - 1) // page_size
             offset = (page - 1) * page_size
             rows = self._fetchall(
                 base_sql + f" LIMIT {page_size} OFFSET {offset}", params
             )
-            return serialize(
-                {"total": total, "page": page, "pages": pages,
-                 "page_size": page_size, "data": rows},
-                label=label,
-            )
+            return self._paginated_jmd(rows, label, total, page, page_size)
 
         rows = self._fetchall(base_sql, params)
         if not rows:
@@ -268,7 +319,15 @@ class SQLTranslator:
         return _rows_to_jmd(rows, label)
 
     def _query(self, jmd_source: str) -> str:
-        """Execute a QBE query document (#?) with optional pagination."""
+        """Execute a QBE query document (#?) with optional pagination or aggregation.
+
+        Frontmatter keys control the execution mode:
+
+        - ``count`` (bare): return only the row count, no data.
+        - ``size`` / ``page``: paginate the result set.
+        - ``group``, ``sum``, ``avg``, ``min``, ``max``: aggregate mode —
+          dispatches to :meth:`_aggregate`.
+        """
         query_parser = JMDQueryParser()
         doc = query_parser.parse(jmd_source)
         fm = query_parser.frontmatter
@@ -276,12 +335,18 @@ class SQLTranslator:
 
         # Translate each QueryField into a SQL WHERE fragment.
         where, params = self._build_where_from_fields(doc.fields)
-        base_sql = f'SELECT * FROM "{table.name}"'
-        count_sql = f'SELECT COUNT(*) FROM "{table.name}"'
+
+        # Aggregation mode: any of group/sum/avg/min/max present in frontmatter.
+        if "group" in fm or any(k in fm for k in _AGG_FUNCS):
+            return self._aggregate(table, doc.label, where, params, fm)
+
+        base_sql = f'SELECT * FROM {_quote_identifier(table.name)}'
+        count_sql = f'SELECT COUNT(*) FROM {_quote_identifier(table.name)}'
         if where:
             base_sql += f" WHERE {where}"
             count_sql += f" WHERE {where}"
 
+        # count (bare key without group) — return only the count, no rows.
         if "count" in fm:
             total = self._conn.execute(count_sql, params).fetchone()[0]
             return serialize({"count": total}, label=doc.label)
@@ -290,16 +355,11 @@ class SQLTranslator:
         if page_size > 0:
             page = max(1, int(fm.get("page", 1)))
             total = self._conn.execute(count_sql, params).fetchone()[0]
-            pages = (total + page_size - 1) // page_size
             offset = (page - 1) * page_size
             rows = self._fetchall(
                 base_sql + f" LIMIT {page_size} OFFSET {offset}", params
             )
-            return serialize(
-                {"total": total, "page": page, "pages": pages,
-                 "page_size": page_size, "data": rows},
-                label=doc.label,
-            )
+            return self._paginated_jmd(rows, doc.label, total, page, page_size)
 
         rows = self._fetchall(base_sql, params)
         return _rows_to_jmd(rows, doc.label)
@@ -518,6 +578,140 @@ class SQLTranslator:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _paginated_jmd(
+        self,
+        rows: list[dict],
+        label: str,
+        total: int,
+        page: int,
+        page_size: int,
+    ) -> str:
+        """Wrap a page of rows in a JMD document with pagination frontmatter.
+
+        Pagination metadata is emitted *before* the root heading so that
+        it is structurally distinct from body fields and immediately
+        available to the next agent in the pipeline as document-level
+        metadata (see JMD spec §3.5, §16).
+        """
+        pages = (total + page_size - 1) // page_size
+        fm = (
+            f"total: {total}\n"
+            f"page: {page}\n"
+            f"pages: {pages}\n"
+            f"page_size: {page_size}\n"
+        )
+        body = serialize({"data": rows}, label=label)
+        return fm + "\n" + body
+
+    def _aggregate(
+        self,
+        table: TableInfo,
+        label: str,
+        where: str,
+        where_params: list,
+        fm: dict,
+    ) -> str:
+        """Build and execute a GROUP BY query from frontmatter aggregation keys.
+
+        Translates frontmatter keys ``group``, ``sum``, ``avg``, ``min``,
+        ``max``, ``count``, ``having``, and ``order`` into a single SQL
+        SELECT … GROUP BY … HAVING … ORDER BY statement.
+
+        Result columns for aggregate functions are named ``<func>_<field>``
+        (e.g. ``sum_Freight``, ``avg_UnitPrice``).  The ``count`` bare key
+        produces a ``count`` column via COUNT(*).
+
+        ``having:`` accepts comma-separated comparison conditions that
+        reference result column aliases (e.g. ``having: count > 5,
+        sum_Freight > 1000``).  Each condition is parameterized.
+
+        ``order:`` accepts comma-separated ``<column> [asc|desc]`` pairs
+        referencing any result column (grouping key or aggregate alias).
+
+        Pagination via ``size:`` / ``page:`` is applied to the aggregated
+        result set using a subquery COUNT.
+        """
+        select_parts: list[str] = []
+        group_cols: list[str] = []
+
+        if "group" in fm:
+            for col in str(fm["group"]).split(","):
+                col = col.strip()
+                if col:
+                    group_cols.append(col)
+                    select_parts.append(_quote_identifier(col))
+
+        if "count" in fm:
+            select_parts.append("COUNT(*) AS count")
+
+        for func in _AGG_FUNCS:
+            if func not in fm:
+                continue
+            for col in str(fm[func]).split(","):
+                col = col.strip()
+                if not col:
+                    continue
+                alias = f"{func}_{col}"
+                select_parts.append(
+                    f"{func.upper()}({_quote_identifier(col)})"
+                    f" AS {_quote_identifier(alias)}"
+                )
+
+        if not select_parts:
+            select_parts = ["COUNT(*) AS count"]
+
+        select_clause = ", ".join(select_parts)
+        sql = f'SELECT {select_clause} FROM {_quote_identifier(table.name)}'
+
+        if where:
+            sql += f" WHERE {where}"
+
+        if group_cols:
+            group_clause = ", ".join(_quote_identifier(c) for c in group_cols)
+            sql += f" GROUP BY {group_clause}"
+
+        having_clauses: list[str] = []
+        having_params: list[Any] = []
+        if "having" in fm:
+            for raw in str(fm["having"]).split(","):
+                parsed = _parse_comparison(raw.strip())
+                if parsed:
+                    clause, val = parsed
+                    having_clauses.append(clause)
+                    having_params.append(val)
+        if having_clauses:
+            sql += " HAVING " + " AND ".join(having_clauses)
+
+        order_parts: list[str] = []
+        if "order" in fm:
+            for item in str(fm["order"]).split(","):
+                parts = item.strip().split()
+                if not parts:
+                    continue
+                col = parts[0]
+                direction = parts[1].upper() if len(parts) > 1 else "ASC"
+                if direction not in ("ASC", "DESC"):
+                    direction = "ASC"
+                order_parts.append(f"{col} {direction}")
+        if order_parts:
+            sql += " ORDER BY " + ", ".join(order_parts)
+
+        all_params = where_params + having_params
+
+        page_size = int(fm["size"]) if "size" in fm else 0
+        if page_size > 0:
+            page = max(1, int(fm.get("page", 1)))
+            count_sql = f"SELECT COUNT(*) FROM ({sql})"
+            total = self._conn.execute(count_sql, all_params).fetchone()[0]
+            offset = (page - 1) * page_size
+            rows = self._fetchall(
+                sql + f" LIMIT {page_size} OFFSET {offset}", all_params
+            )
+            return self._paginated_jmd(rows, label, total, page, page_size)
+
+        rows = self._fetchall(sql, all_params)
+        return _rows_to_jmd(rows, label)
 
     def _resolve_or_error(self, label: str) -> TableInfo:
         """Resolve a JMD label to a TableInfo or raise ValueError."""

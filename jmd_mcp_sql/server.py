@@ -104,13 +104,14 @@ Use frontmatter fields before the #? heading to control pagination:
 
   read("size: 50\npage: 1\n\n#? Orders")
 
-The response wraps results in a root object with metadata:
+The response carries pagination metadata as frontmatter — before the root heading:
 
-  # Orders
   total: 830
   page: 1
   pages: 17
   page_size: 50
+
+  # Orders
   ## data[]
   - OrderID: 10248
     ...
@@ -125,6 +126,33 @@ Returns: `# Orders\ncount: 830`
 **Rule of thumb:** Use `size: 50` for any table you haven't inspected before.
 For tables with fewer than ~20 rows (e.g. Categories, Shippers) pagination is
 optional.
+
+## Aggregation
+
+Aggregation is expressed as frontmatter before the #? heading.
+QBE filter fields narrow rows *before* aggregation (SQL WHERE).
+The `having:` key filters *after* aggregation (SQL HAVING).
+
+| Key               | SQL           | Result column name                  |
+| group: f1, f2     | GROUP BY      | (grouping keys pass through)        |
+| sum: field        | SUM(field)    | sum_field                           |
+| avg: field        | AVG(field)    | avg_field                           |
+| min: field        | MIN(field)    | min_field                           |
+| max: field        | MAX(field)    | max_field                           |
+| count             | COUNT(*)      | count                               |
+
+Multiple fields per function: `sum: Freight, Total` → `sum_Freight`, `sum_Total`.
+
+  order: sum_revenue desc, EmployeeID asc   → ORDER BY (multiple columns, mixed)
+  having: count > 5                         → HAVING COUNT(*) > 5
+  having: sum_Freight > 1000, count > 2     → HAVING ... AND ... (comma = AND)
+
+`having:` supports: >, >=, <, <=, =
+`order:` references any result column — grouping keys or aggregate aliases.
+`size:` and `page:` apply to the aggregated result set.
+
+**Example — top 3 employees by revenue:**
+  read("group: EmployeeID\nsum: revenue\norder: sum_revenue desc\nsize: 3\n\n#? OrderDetails")
 
 ## Error handling
 
