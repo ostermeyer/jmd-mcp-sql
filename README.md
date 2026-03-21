@@ -20,12 +20,6 @@ The document mode determines what each tool does: data (`#`), query (`#?`), sche
 pip install jmd-mcp-sql
 ```
 
-Install the Northwind demo database:
-
-```bash
-python -m jmd_mcp_sql.install_northwind
-```
-
 ## Usage
 
 ### With Claude Code
@@ -43,7 +37,7 @@ Add to your MCP configuration (`~/.claude/settings.json`):
 }
 ```
 
-Or use the Northwind demo (no argument needed):
+Or use the bundled Northwind demo database (no argument needed):
 
 ```json
 {
@@ -54,6 +48,11 @@ Or use the Northwind demo (no argument needed):
   }
 }
 ```
+
+The demo database ships as `northwind.sql` (plain text, version-controlled). On the
+first run without an explicit database path, the server creates `northwind.db` from
+that file automatically. Subsequent starts reuse the generated file. The `.db` file
+is not tracked by git.
 
 ### Tool examples
 

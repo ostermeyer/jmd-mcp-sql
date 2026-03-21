@@ -216,10 +216,16 @@ def main() -> None:
     else:
         db_path = Path(__file__).parent / "northwind.db"
         if not db_path.exists():
-            raise SystemExit(
-                "Northwind demo database not found. "
-                "Run: python -m jmd_mcp_sql.install_northwind"
-            )
+            sql_path = Path(__file__).parent / "northwind.sql"
+            if not sql_path.exists():
+                raise SystemExit(
+                    "Northwind demo database not found. "
+                    "northwind.sql is missing from the jmd_mcp_sql/ package directory."
+                )
+            import sqlite3 as _sqlite3
+            _conn = _sqlite3.connect(str(db_path))
+            _conn.executescript(sql_path.read_text(encoding="utf-8"))
+            _conn.close()
 
     global _translator
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
