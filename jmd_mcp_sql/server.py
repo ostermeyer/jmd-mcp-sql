@@ -130,6 +130,45 @@ Returns: `# Orders\ncount: 830`
 For tables with fewer than ~20 rows (e.g. Categories, Shippers) pagination is
 optional.
 
+## Field projection
+
+Use `select:` frontmatter to return only specific columns — reduces response
+size and keeps context windows clean.
+
+  select: OrderID, EmployeeID
+
+  #? Orders
+
+Works with `#` (data) and `#?` (query) documents, including aggregation
+(where `select:` filters the result columns after the GROUP BY).
+
+## Joins
+
+Use `join:` frontmatter to query across multiple tables in one call.
+The value is `<TableName> on <JoinColumn>` (INNER JOIN, equi-join).
+
+  join: Order Details on OrderID
+  sum: UnitPrice * Quantity * (1 - Discount) as revenue
+  group: EmployeeID
+  order: revenue desc
+
+  #? Orders
+
+Multiple joins: comma-separated in a single `join:` value.
+
+  join: Order Details on OrderID, Employees on EmployeeID
+
+**Expression syntax in aggregation with joins:**
+Use `<expression> as <alias>` to compute derived values:
+
+  sum: UnitPrice * Quantity * (1 - Discount) as revenue
+
+The alias becomes the result column name. Without `as`, the default alias
+`<func>_<field>` applies (e.g. `sum_Freight`).
+
+Only column names, numeric literals, and arithmetic operators
+(`+`, `-`, `*`, `/`) are allowed in expressions — no subqueries.
+
 ## Aggregation
 
 Aggregation is expressed as frontmatter before the #? heading.

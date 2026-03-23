@@ -192,6 +192,55 @@ count: 830
 Use `total` and `pages` to determine whether to fetch more pages.
 For tables with fewer than ~20 rows pagination is optional.
 
+## Field Projection
+
+Use `select:` frontmatter to return only specific columns. This keeps
+responses small and context windows focused.
+
+```text
+read("select: OrderID, EmployeeID\nsize: 50\n\n#? Orders")
+```
+
+Works with both `#` (data) and `#?` (query) documents. When combined with
+aggregation, `select:` filters the result columns after the GROUP BY.
+
+## Joins
+
+Use `join:` frontmatter to query across multiple tables in one call.
+The value is `<TableName> on <JoinColumn>` (INNER JOIN, equi-join on a
+column that exists in both tables).
+
+```text
+read("join: Order Details on OrderID\nsum: UnitPrice * Quantity * (1 - Discount) as revenue\ngroup: EmployeeID\norder: revenue desc\n\n#? Orders")
+```
+
+**Multiple joins** — comma-separated in a single `join:` value:
+
+```text
+join: Order Details on OrderID, Employees on EmployeeID
+```
+
+**Expression syntax** — use `<expression> as <alias>` in aggregate functions
+to compute derived values across joined columns:
+
+```text
+sum: UnitPrice * Quantity * (1 - Discount) as revenue
+```
+
+The alias becomes the result column name. Without `as`, the default alias
+`<func>_<field>` applies (e.g. `sum_Freight`).
+
+Allowed in expressions: column names, numeric literals, arithmetic operators
+(`+`, `-`, `*`, `/`), and standard SQL functions (`SUM`, `AVG`, `ROUND`, …).
+Subqueries and SQL keywords are not permitted.
+
+**Projection rules for join queries:**
+
+- Unambiguous columns (appear in exactly one table) resolve automatically.
+- Join key columns always resolve to the main table.
+- Columns present in multiple tables (other than join keys) require explicit
+  qualification — specify them via `select:` or filter on the unambiguous side.
+
 ## Aggregation
 
 Aggregation is expressed as **frontmatter** before the `#?` heading.

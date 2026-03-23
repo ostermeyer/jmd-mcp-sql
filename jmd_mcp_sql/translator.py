@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from dataclasses import dataclass
 from typing import Any
 
 from jmd import (
@@ -94,6 +95,164 @@ from .schema import SchemaInspector, TableInfo
 
 # Aggregate function names recognised in query frontmatter.
 _AGG_FUNCS: tuple[str, ...] = ("sum", "avg", "min", "max")
+
+# SQL function names permitted in aggregate expressions.
+_SQL_FUNC_NAMES: frozenset[str] = frozenset({
+    "SUM", "AVG", "MIN", "MAX", "COUNT", "COALESCE", "NULLIF",
+    "ABS", "ROUND", "LENGTH", "UPPER", "LOWER", "CAST",
+})
+
+
+@dataclass
+class JoinSpec:
+    """Parsed representation of a single JOIN clause from frontmatter.
+
+    Attributes:
+        table: Table name as written (may contain spaces).
+        on_col: Equi-join column name (must exist in both tables).
+    """
+
+    table: str
+    on_col: str
+
+
+def _parse_select_cols(raw: str) -> list[str]:
+    """Parse a comma-separated list of column names from a select: value.
+
+    Args:
+        raw: Raw string value from the ``select:`` frontmatter key,
+            e.g. ``"OrderID, EmployeeID"``.
+
+    Returns:
+        List of stripped, non-empty column name strings.
+    """
+    return [c.strip() for c in raw.split(",") if c.strip()]
+
+
+def _parse_join_specs(raw: str) -> list[JoinSpec]:
+    """Parse a comma-separated list of join specifications.
+
+    Each segment must be of the form ``<TableName> on <ColumnName>``.
+    Multiple joins can be expressed as a single comma-separated value
+    for the ``join:`` frontmatter key.
+
+    Args:
+        raw: Raw string value from the ``join:`` frontmatter key,
+            e.g. ``"Order Details on OrderID, Employees on EmployeeID"``.
+
+    Returns:
+        List of :class:`JoinSpec` instances, one per join.
+
+    Raises:
+        ValueError: If any segment does not match
+            ``<TableName> on <ColumnName>``.
+    """
+    specs: list[JoinSpec] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        halves = re.split(r'\s+on\s+', part, maxsplit=1, flags=re.IGNORECASE)
+        if len(halves) != 2:
+            raise ValueError(
+                f"Invalid join spec {part!r}. "
+                f"Expected '<TableName> on <ColumnName>'"
+            )
+        specs.append(
+            JoinSpec(table=halves[0].strip(), on_col=halves[1].strip())
+        )
+    return specs
+
+
+def _parse_agg_expr(raw: str) -> tuple[str, str | None]:
+    """Parse an aggregate expression with an optional alias.
+
+    Finds the last `` as `` (case-insensitive) in *raw* to split the
+    expression from its alias.
+
+    Args:
+        raw: Expression string, e.g. ``"UnitPrice * Quantity as revenue"``.
+
+    Returns:
+        A tuple ``(expr, alias)`` where *alias* is ``None`` if no
+        ``AS`` clause was found.
+
+    Raises:
+        ValueError: If the alias part contains invalid identifier
+            characters.
+    """
+    idx = raw.lower().rfind(' as ')
+    if idx != -1:
+        expr = raw[:idx].strip()
+        alias = raw[idx + 4:].strip()
+        if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', alias):
+            raise ValueError(
+                f"Invalid alias {alias!r} in expression {raw!r}. "
+                f"Aliases must be valid SQL identifiers."
+            )
+        return (expr, alias)
+    return (raw.strip(), None)
+
+
+def _validate_and_qualify_expression(
+    expr: str, namespace: dict[str, str | None]
+) -> str:
+    r"""Validate an arithmetic expression and qualify column references.
+
+    Performs two security checks before substituting qualified column
+    references:
+
+    1. Character-level: only word characters, whitespace, arithmetic
+       operators, parentheses, and dots are allowed.
+    2. Token-level: every alpha-start identifier must be a known SQL
+       function name or a column from the namespace.
+
+    Args:
+        expr: Raw expression string, e.g.
+            ``"UnitPrice * Quantity * (1 - Discount)"``.
+        namespace: Mapping of column name to qualified reference
+            (e.g. ``'t0."UnitPrice"'``), or ``None`` when the column
+            is ambiguous across joined tables.
+
+    Returns:
+        The expression with unqualified column names replaced by their
+        qualified equivalents.
+
+    Raises:
+        ValueError: If the expression contains invalid characters, an
+            unknown identifier, or an ambiguous column reference.
+    """
+    if not re.match(r'^[\w\s\+\-\*\/\(\)\.]+$', expr):
+        raise ValueError(
+            f"Expression {expr!r} contains invalid characters"
+        )
+    tokens = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', expr)
+    for token in tokens:
+        if token.upper() in _SQL_FUNC_NAMES:
+            continue
+        if token in namespace:
+            if namespace[token] is None:
+                raise ValueError(
+                    f"Ambiguous column '{token}' in expression. "
+                    f"Exists in multiple joined tables."
+                )
+        else:
+            raise ValueError(
+                f"Unknown identifier '{token}' in expression. "
+                f"Only column names and standard SQL functions are allowed."
+            )
+
+    # Qualify column references: process longest names first so that
+    # partial-name matches do not shadow longer names.
+    result = expr
+    for col_name in sorted(namespace.keys(), key=len, reverse=True):
+        qualified = namespace[col_name]
+        if qualified is None:
+            continue
+        result = re.sub(
+            r'\b' + re.escape(col_name) + r'\b', qualified, result
+        )
+    return result
 
 
 def _parse_comparison(condition: str) -> tuple[str, Any] | None:
@@ -294,8 +453,30 @@ class SQLTranslator:
                 label="Error",
             )
         where, params = self._build_where(data)
-        base_sql = f'SELECT * FROM {_quote_identifier(table.name)}'
-        count_sql = f'SELECT COUNT(*) FROM {_quote_identifier(table.name)}'
+
+        # Apply select: column projection if requested.
+        select_clause = "*"
+        if "select" in fm:
+            sel_cols = _parse_select_cols(str(fm["select"]))
+            if sel_cols:
+                for col in sel_cols:
+                    if col not in table_cols:
+                        available = ", ".join(sorted(table_cols))
+                        raise ValueError(
+                            f"Unknown column '{col}' in 'select'. "
+                            f"Available: {available}"
+                        )
+                select_clause = ", ".join(
+                    _quote_identifier(c) for c in sel_cols
+                )
+
+        base_sql = (
+            f'SELECT {select_clause}'
+            f' FROM {_quote_identifier(table.name)}'
+        )
+        count_sql = (
+            f'SELECT COUNT(*) FROM {_quote_identifier(table.name)}'
+        )
         if where:
             base_sql += f" WHERE {where}"
             count_sql += f" WHERE {where}"
@@ -332,14 +513,18 @@ class SQLTranslator:
     def _query(self, jmd_source: str) -> str:
         """Execute a QBE query document (#?) with optional pagination.
 
-        Also handles aggregation mode when frontmatter contains group/agg keys.
+        Also handles aggregation mode when frontmatter contains group/agg
+        keys, and cross-table joins when ``join:`` is present.
 
         Frontmatter keys control the execution mode:
 
+        - ``join``: cross-table JOIN — dispatches to
+          :meth:`_query_with_joins`.
         - ``count`` (bare): return only the row count, no data.
         - ``size`` / ``page``: paginate the result set.
         - ``group``, ``sum``, ``avg``, ``min``, ``max``: aggregate mode —
           dispatches to :meth:`_aggregate`.
+        - ``select``: restrict returned columns.
         """
         query_parser = JMDQueryParser()
         doc = query_parser.parse(jmd_source)
@@ -350,12 +535,40 @@ class SQLTranslator:
         table_cols = {c.name for c in table.columns}
         where, params = self._build_where_from_fields(doc.fields, table_cols)
 
-        # Aggregation mode: any of group/sum/avg/min/max present in frontmatter.
+        # JOIN mode: delegate to _query_with_joins before any other logic.
+        if "join" in fm:
+            join_specs = _parse_join_specs(str(fm["join"]))
+            return self._query_with_joins(
+                table, doc.label, doc.fields, fm, join_specs
+            )
+
+        # Aggregation mode: any of group/sum/avg/min/max present.
         if "group" in fm or any(k in fm for k in _AGG_FUNCS):
             return self._aggregate(table, doc.label, where, params, fm)
 
-        base_sql = f'SELECT * FROM {_quote_identifier(table.name)}'
-        count_sql = f'SELECT COUNT(*) FROM {_quote_identifier(table.name)}'
+        # Apply select: column projection if requested.
+        select_clause = "*"
+        if "select" in fm:
+            sel_cols = _parse_select_cols(str(fm["select"]))
+            if sel_cols:
+                for col in sel_cols:
+                    if col not in table_cols:
+                        available = ", ".join(sorted(table_cols))
+                        raise ValueError(
+                            f"Unknown column '{col}' in 'select'. "
+                            f"Available: {available}"
+                        )
+                select_clause = ", ".join(
+                    _quote_identifier(c) for c in sel_cols
+                )
+
+        base_sql = (
+            f'SELECT {select_clause}'
+            f' FROM {_quote_identifier(table.name)}'
+        )
+        count_sql = (
+            f'SELECT COUNT(*) FROM {_quote_identifier(table.name)}'
+        )
         if where:
             base_sql += f" WHERE {where}"
             count_sql += f" WHERE {where}"
@@ -687,6 +900,9 @@ class SQLTranslator:
 
         Pagination via ``size:`` / ``page:`` is applied to the aggregated
         result set using a subquery COUNT.
+
+        If ``select:`` is present it filters the result columns after
+        fetching (post-aggregation projection).
         """
         # ----------------------------------------------------------------
         # Validation: every user-supplied field name must exist in the
@@ -800,6 +1016,19 @@ class SQLTranslator:
 
         all_params = where_params + having_params
 
+        # select: post-fetch projection — filter rows to named columns.
+        sel_cols: list[str] = []
+        if "select" in fm:
+            sel_cols = _parse_select_cols(str(fm["select"]))
+            if sel_cols:
+                for col in sel_cols:
+                    if col not in result_cols:
+                        available = ", ".join(sorted(result_cols))
+                        raise ValueError(
+                            f"Unknown result column '{col}' in 'select'. "
+                            f"Available: {available}"
+                        )
+
         page_size = int(fm["size"]) if "size" in fm else 0
         if page_size > 0:
             page = max(1, int(fm.get("page", 1)))
@@ -809,9 +1038,387 @@ class SQLTranslator:
             rows = self._fetchall(
                 sql + f" LIMIT {page_size} OFFSET {offset}", all_params
             )
+            if sel_cols:
+                rows = [{k: r[k] for k in sel_cols} for r in rows]
             return self._paginated_jmd(rows, label, total, page, page_size)
 
         rows = self._fetchall(sql, all_params)
+        if sel_cols:
+            rows = [{k: r[k] for k in sel_cols} for r in rows]
+        return _rows_to_jmd(rows, label)
+
+    def _build_col_namespace(
+        self,
+        main_table: TableInfo,
+        main_alias: str,
+        join_infos: list[tuple[TableInfo, JoinSpec]],
+        join_aliases: list[str],
+    ) -> dict[str, str | None]:
+        """Build a column → qualified-reference mapping for a JOIN query.
+
+        Maps each column name visible in the joined query to a qualified
+        SQL reference like ``t0."OrderID"``.  Columns that appear in more
+        than one table (excluding equi-join keys, which are resolved to
+        the main table) map to ``None`` to signal ambiguity.
+
+        Join keys are always resolved to the main table so that WHERE
+        clause fragments generated from QBE filters reference a single
+        definitive source.
+
+        Args:
+            main_table: TableInfo for the primary (left-hand) table.
+            main_alias: SQL alias assigned to the primary table (``"t0"``).
+            join_infos: List of ``(TableInfo, JoinSpec)`` pairs, one per
+                JOIN clause.
+            join_aliases: SQL aliases for joined tables (``"t1"``, …).
+
+        Returns:
+            Dict mapping column name → qualified SQL reference, or
+            ``None`` for genuinely ambiguous columns.
+        """
+        join_keys = {spec.on_col for _, spec in join_infos}
+
+        # Map each column name to the list of aliases that own it.
+        col_alias_map: dict[str, list[str]] = {}
+        for col in main_table.columns:
+            col_alias_map.setdefault(col.name, []).append(main_alias)
+        for (joined_table, _spec), alias in zip(
+            join_infos, join_aliases, strict=True
+        ):
+            for col in joined_table.columns:
+                col_alias_map.setdefault(col.name, []).append(alias)
+
+        namespace: dict[str, str | None] = {}
+        for col_name, aliases in col_alias_map.items():
+            if col_name in join_keys:
+                # Join keys are unambiguously resolved to the main table.
+                namespace[col_name] = (
+                    f'{main_alias}.{_quote_identifier(col_name)}'
+                )
+            elif len(aliases) == 1:
+                namespace[col_name] = (
+                    f'{aliases[0]}.{_quote_identifier(col_name)}'
+                )
+            else:
+                namespace[col_name] = None  # Genuinely ambiguous.
+        return namespace
+
+    def _aggregate_join(
+        self,
+        label: str,
+        from_clause: str,
+        where: str,
+        where_params: list[Any],
+        fm: dict[str, Any],
+        namespace: dict[str, str | None],
+    ) -> str:
+        """Build and execute a GROUP BY query over a multi-table FROM clause.
+
+        Mirrors :meth:`_aggregate` but works with an already-built
+        ``FROM … JOIN …`` string and a column namespace that maps column
+        names to qualified references.  Aggregate expressions may use
+        arithmetic (e.g. ``UnitPrice * Quantity * (1 - Discount) as
+        revenue``); each expression is validated and qualified via
+        :func:`_validate_and_qualify_expression`.
+
+        Args:
+            label: Document label for the JMD result.
+            from_clause: SQL fragment starting at the table name, e.g.
+                ``'"Orders" t0 JOIN "Order Details" t1 ON …'``.
+            where: Pre-built WHERE clause string (may be empty).
+            where_params: Bind parameters for the WHERE clause.
+            fm: Parsed frontmatter dict.
+            namespace: Column → qualified-reference mapping from
+                :meth:`_build_col_namespace`.
+
+        Returns:
+            A JMD document string with the aggregation result.
+
+        Raises:
+            ValueError: On unknown columns, ambiguous references, or
+                invalid expressions.
+        """
+        select_parts: list[str] = []
+        group_cols: list[str] = []
+
+        if "group" in fm:
+            for col in str(fm["group"]).split(","):
+                col = col.strip()
+                if not col:
+                    continue
+                if col not in namespace:
+                    available = ", ".join(sorted(namespace.keys()))
+                    raise ValueError(
+                        f"Unknown column '{col}' in 'group'. "
+                        f"Available: {available}"
+                    )
+                if namespace[col] is None:
+                    raise ValueError(
+                        f"Ambiguous column '{col}' in 'group'. "
+                        f"Qualify with a table alias."
+                    )
+                group_cols.append(col)
+                qualified = namespace[col]
+                select_parts.append(
+                    f'{qualified} AS {_quote_identifier(col)}'
+                )
+
+        if "count" in fm:
+            select_parts.append("COUNT(*) AS count")
+
+        result_cols: set[str] = set(group_cols)
+        if "count" in fm:
+            result_cols.add("count")
+
+        for func in _AGG_FUNCS:
+            if func not in fm:
+                continue
+            for raw_expr in str(fm[func]).split(","):
+                raw_expr = raw_expr.strip()
+                if not raw_expr:
+                    continue
+                expr, custom_alias = _parse_agg_expr(raw_expr)
+                qualified_expr = _validate_and_qualify_expression(
+                    expr, namespace
+                )
+                alias = (
+                    custom_alias
+                    if custom_alias
+                    else f"{func}_{expr.strip()}"
+                )
+                select_parts.append(
+                    f"{func.upper()}({qualified_expr})"
+                    f" AS {_quote_identifier(alias)}"
+                )
+                result_cols.add(alias)
+
+        if not select_parts:
+            select_parts = ["COUNT(*) AS count"]
+            result_cols.add("count")
+
+        select_clause = ", ".join(select_parts)
+        sql = f'SELECT {select_clause} FROM {from_clause}'
+
+        if where:
+            sql += f" WHERE {where}"
+
+        if group_cols:
+            group_clause = ", ".join(
+                namespace[c] for c in group_cols  # type: ignore[misc]
+            )
+            sql += f" GROUP BY {group_clause}"
+
+        having_clauses: list[str] = []
+        having_params: list[Any] = []
+        if "having" in fm:
+            for raw in str(fm["having"]).split(","):
+                parsed = _parse_comparison(raw.strip())
+                if parsed:
+                    clause, val = parsed
+                    having_col = clause.split()[0]
+                    if having_col not in result_cols:
+                        raise ValueError(
+                            f"Unknown result column '{having_col}' in "
+                            f"'having'. Available: "
+                            f"{', '.join(sorted(result_cols))}"
+                        )
+                    having_clauses.append(clause)
+                    having_params.append(val)
+        if having_clauses:
+            sql += " HAVING " + " AND ".join(having_clauses)
+
+        order_parts: list[str] = []
+        if "order" in fm:
+            for item in str(fm["order"]).split(","):
+                parts = item.strip().split()
+                if not parts:
+                    continue
+                col = parts[0]
+                if col not in result_cols:
+                    raise ValueError(
+                        f"Unknown result column '{col}' in 'order'. "
+                        f"Available: {', '.join(sorted(result_cols))}"
+                    )
+                direction = parts[1].upper() if len(parts) > 1 else "ASC"
+                if direction not in ("ASC", "DESC"):
+                    direction = "ASC"
+                order_parts.append(f"{col} {direction}")
+        if order_parts:
+            sql += " ORDER BY " + ", ".join(order_parts)
+
+        all_params = where_params + having_params
+
+        # select: post-fetch projection.
+        sel_cols: list[str] = []
+        if "select" in fm:
+            sel_cols = _parse_select_cols(str(fm["select"]))
+            if sel_cols:
+                for col in sel_cols:
+                    if col not in result_cols:
+                        available = ", ".join(sorted(result_cols))
+                        raise ValueError(
+                            f"Unknown result column '{col}' in 'select'. "
+                            f"Available: {available}"
+                        )
+
+        page_size = int(fm["size"]) if "size" in fm else 0
+        if page_size > 0:
+            page = max(1, int(fm.get("page", 1)))
+            count_sql = f"SELECT COUNT(*) FROM ({sql})"
+            total = self._conn.execute(count_sql, all_params).fetchone()[0]
+            offset = (page - 1) * page_size
+            rows = self._fetchall(
+                sql + f" LIMIT {page_size} OFFSET {offset}", all_params
+            )
+            if sel_cols:
+                rows = [{k: r[k] for k in sel_cols} for r in rows]
+            return self._paginated_jmd(rows, label, total, page, page_size)
+
+        rows = self._fetchall(sql, all_params)
+        if sel_cols:
+            rows = [{k: r[k] for k in sel_cols} for r in rows]
+        return _rows_to_jmd(rows, label)
+
+    def _query_with_joins(
+        self,
+        table: TableInfo,
+        label: str,
+        fields: list[Any],
+        fm: dict[str, Any],
+        join_specs: list[JoinSpec],
+    ) -> str:
+        """Execute a QBE query that spans multiple tables via JOIN clauses.
+
+        Resolves each :class:`JoinSpec`, assigns SQL table aliases, builds
+        the column namespace, and delegates to either
+        :meth:`_aggregate_join` (when aggregation keys are present) or a
+        plain SELECT (otherwise).
+
+        Args:
+            table: TableInfo for the primary (left-hand) table.
+            label: Document label for the JMD result.
+            fields: Parsed query fields from JMDQueryParser.
+            fm: Parsed frontmatter dict (must contain ``join``).
+            join_specs: Parsed join specifications.
+
+        Returns:
+            A JMD document string with the query result.
+
+        Raises:
+            ValueError: If a join target is unknown, the join column is
+                missing in one of the tables, or a filter column is
+                ambiguous.
+        """
+        # Resolve each join spec to a TableInfo and validate the join col.
+        join_infos: list[tuple[TableInfo, JoinSpec]] = []
+        for spec in join_specs:
+            joined_table = self._schema.resolve(spec.table)
+            if joined_table is None:
+                available = ", ".join(self._schema.tables().keys())
+                raise ValueError(
+                    f"Unknown table '{spec.table}' in join. "
+                    f"Available: {available}"
+                )
+            main_cols = {c.name for c in table.columns}
+            joined_cols = {c.name for c in joined_table.columns}
+            if spec.on_col not in main_cols:
+                raise ValueError(
+                    f"Join column '{spec.on_col}' not found in "
+                    f"table '{table.name}'."
+                )
+            if spec.on_col not in joined_cols:
+                raise ValueError(
+                    f"Join column '{spec.on_col}' not found in "
+                    f"table '{spec.table}'."
+                )
+            join_infos.append((joined_table, spec))
+
+        main_alias = "t0"
+        join_aliases = [f"t{i + 1}" for i in range(len(join_infos))]
+
+        namespace = self._build_col_namespace(
+            table, main_alias, join_infos, join_aliases
+        )
+        all_cols = set(namespace.keys())
+
+        where, params = self._build_where_from_fields(
+            fields, all_cols, col_namespace=namespace
+        )
+
+        # Build the FROM … JOIN … clause.
+        from_clause = f'{_quote_identifier(table.name)} {main_alias}'
+        for (joined_table, spec), alias in zip(
+            join_infos, join_aliases, strict=True
+        ):
+            on_main = f'{main_alias}.{_quote_identifier(spec.on_col)}'
+            on_joined = f'{alias}.{_quote_identifier(spec.on_col)}'
+            from_clause += (
+                f' JOIN {_quote_identifier(joined_table.name)} {alias}'
+                f' ON {on_main} = {on_joined}'
+            )
+
+        # Aggregation mode.
+        if "group" in fm or any(k in fm for k in _AGG_FUNCS):
+            return self._aggregate_join(
+                label, from_clause, where, params, fm, namespace
+            )
+
+        # Plain SELECT mode.
+        select_clause: str
+        if "select" in fm:
+            sel_cols = _parse_select_cols(str(fm["select"]))
+            if sel_cols:
+                for col in sel_cols:
+                    if col not in namespace:
+                        available = ", ".join(sorted(namespace.keys()))
+                        raise ValueError(
+                            f"Unknown column '{col}' in 'select'. "
+                            f"Available: {available}"
+                        )
+                    if namespace[col] is None:
+                        raise ValueError(
+                            f"Ambiguous column '{col}' in 'select'. "
+                            f"Qualify with a table alias."
+                        )
+                select_clause = ", ".join(
+                    f'{namespace[c]} AS {_quote_identifier(c)}'
+                    for c in sel_cols
+                )
+            else:
+                select_clause = "*"
+        else:
+            select_clause = "*"
+
+        base_sql = f'SELECT {select_clause} FROM {from_clause}'
+        if where:
+            base_sql += f" WHERE {where}"
+
+        # count: true — return only the row count.
+        if "count" in fm:
+            count_sql = (
+                f'SELECT COUNT(*) FROM {from_clause}'
+            )
+            if where:
+                count_sql += f" WHERE {where}"
+            total = self._conn.execute(count_sql, params).fetchone()[0]
+            return serialize({"count": total}, label=label)
+
+        page_size = int(fm["size"]) if "size" in fm else 0
+        if page_size > 0:
+            page = max(1, int(fm.get("page", 1)))
+            count_sql = (
+                f'SELECT COUNT(*) FROM {from_clause}'
+            )
+            if where:
+                count_sql += f" WHERE {where}"
+            total = self._conn.execute(count_sql, params).fetchone()[0]
+            offset = (page - 1) * page_size
+            rows = self._fetchall(
+                base_sql + f" LIMIT {page_size} OFFSET {offset}", params
+            )
+            return self._paginated_jmd(rows, label, total, page, page_size)
+
+        rows = self._fetchall(base_sql, params)
         return _rows_to_jmd(rows, label)
 
     def _resolve_or_error(self, label: str) -> TableInfo:
@@ -836,7 +1443,10 @@ class SQLTranslator:
         return " AND ".join(clauses), list(filters.values())
 
     def _build_where_from_fields(
-        self, fields: list[Any], table_cols: set[str]
+        self,
+        fields: list[Any],
+        table_cols: set[str],
+        col_namespace: dict[str, str | None] | None = None,
     ) -> tuple[str, list[Any]]:
         """Build a WHERE clause from a list of QueryField nodes (query mode).
 
@@ -850,6 +1460,16 @@ class SQLTranslator:
             fields: Parsed query fields from JMDQueryParser.
             table_cols: Valid column names for the target table.  Filter
                 fields referencing unknown columns raise ValueError.
+            col_namespace: Optional qualified-reference mapping for JOIN
+                queries.  When provided, each column is validated for
+                non-ambiguity and the qualified reference is passed to
+                :meth:`_condition_to_sql` via the *qcol* parameter.
+
+        Returns:
+            Tuple of ``(where_clause, params)``.
+
+        Raises:
+            ValueError: On unknown or ambiguous column names.
         """
         clauses: list[str] = []
         params: list[Any] = []
@@ -864,14 +1484,25 @@ class SQLTranslator:
                     f"Unknown column '{f.key}' in query filter. "
                     f"Available: {available}"
                 )
-            clause, p = self._condition_to_sql(f.key, f.condition)
+            qcol: str | None = None
+            if col_namespace is not None:
+                if col_namespace.get(f.key) is None:
+                    raise ValueError(
+                        f"Ambiguous column '{f.key}' in query filter. "
+                        f"Exists in multiple joined tables."
+                    )
+                qcol = col_namespace[f.key]
+            clause, p = self._condition_to_sql(f.key, f.condition, qcol)
             if clause:
                 clauses.append(clause)
                 params.extend(p)
         return (" AND ".join(clauses), params) if clauses else ("", [])
 
     def _condition_to_sql(
-        self, col: str, cond: Condition
+        self,
+        col: str,
+        cond: Condition,
+        qcol: str | None = None,
     ) -> tuple[str, list[Any]]:
         """Translate a single JMD Condition into a SQL fragment.
 
@@ -890,32 +1521,35 @@ class SQLTranslator:
         Args:
             col: The column name (unquoted).
             cond: The parsed Condition object from jmd._query.
+            qcol: Optional pre-qualified SQL reference (e.g.
+                ``'t0."OrderID"'``).  When ``None``, the column is
+                quoted via :func:`_quote_identifier`.
 
         Returns:
             A tuple of (sql_fragment, parameters).  Returns ("", []) for
             unknown or unsupported operators so callers can skip them.
         """
-        qcol = _quote_identifier(col)
+        effective_qcol = qcol if qcol is not None else _quote_identifier(col)
         op, values = cond.op, cond.values
 
         if op == "!":
             # Negation wraps any other condition: "!Germany" → NOT (col = ?)
-            inner, p = self._condition_to_sql(col, values[0])
+            inner, p = self._condition_to_sql(col, values[0], effective_qcol)
             return (f"NOT ({inner})", p) if inner else ("", [])
         if op == "=":
-            return f"{qcol} = ?", [values[0]]
+            return f"{effective_qcol} = ?", [values[0]]
         if op in (">", ">=", "<", "<="):
-            return f"{qcol} {op} ?", [values[0]]
+            return f"{effective_qcol} {op} ?", [values[0]]
         if op == "|":
             # Alternation: Germany|France|UK → col IN (?, ?, ?)
             placeholders = ", ".join("?" * len(values))
-            return f"{qcol} IN ({placeholders})", list(values)
+            return f"{effective_qcol} IN ({placeholders})", list(values)
         if op == "~":
             # Substring match: ~Corp → col LIKE '%Corp%'
-            return f"{qcol} LIKE ?", [f"%{values[0]}%"]
+            return f"{effective_qcol} LIKE ?", [f"%{values[0]}%"]
         if op == "regex":
             # Full-match regex via the REGEXP UDF registered in __init__.
-            return f"{qcol} REGEXP ?", [values[0]]
+            return f"{effective_qcol} REGEXP ?", [values[0]]
 
         # Unknown operator — skip silently to stay forwards-compatible.
         return "", []
