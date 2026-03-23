@@ -43,6 +43,7 @@ class SchemaInspector:
     """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
+        """Store the connection and initialise the lazy cache."""
         self._conn = conn
         # None means "not yet loaded"; an empty dict means "loaded, no tables".
         self._cache: dict[str, TableInfo] | None = None
@@ -72,7 +73,9 @@ class SchemaInspector:
         # Build candidate spellings: original, lower-case, with/without a
         # trailing "s".  This covers the most common singular/plural mismatch
         # between LLM-generated labels and actual table names.
-        stripped = label[:-1] if label.endswith("s") and len(label) > 1 else None
+        stripped = (
+            label[:-1] if label.endswith("s") and len(label) > 1 else None
+        )
         stripped_lower = (
             label.lower()[:-1]
             if label.lower().endswith("s") and len(label) > 1

@@ -32,13 +32,13 @@ from mcp.server.fastmcp import FastMCP
 from .translator import SQLTranslator
 
 _INSTRUCTIONS = """
-This server exposes a SQLite database through three tools — read, write, delete —
-using JMD (JSON Markdown) as the data format.
+This server exposes a SQLite database through three tools —
+read, write, delete — using JMD (JSON Markdown) as the data format.
 
 ## JMD document syntax
 
-Every document starts with a heading line that sets the document type and table name,
-followed by key: value pairs (one per line):
+Every document starts with a heading line that sets the document type
+and table name, followed by key: value pairs (one per line):
 
   # Product          → data document   (exact lookup / insert-or-replace)
   #? Product         → query document  (filter / list)
@@ -88,7 +88,8 @@ This returns a #! document with column names, JMD types, and modifiers
   write("# Orders\nid: 1\nstatus: pending\ntotal: 99.90")
 
 **Create a table:**
-  write("#! Products\nid: integer readonly\nname: string\nprice: float optional")
+  write("#! Products\nid: integer readonly\nname: string\n"
+        "price: float optional")
 
 **Delete a record:**
   delete("#- Orders\nid: 1")
@@ -105,7 +106,8 @@ Use frontmatter fields before the #? heading to control pagination:
 
   read("size: 50\npage: 1\n\n#? Orders")
 
-The response carries pagination metadata as frontmatter — before the root heading:
+The response carries pagination metadata as frontmatter —
+before the root heading:
 
   total: 830
   page: 1
@@ -142,7 +144,8 @@ The `having:` key filters *after* aggregation (SQL HAVING).
 | max: field        | MAX(field)    | max_field                           |
 | count             | COUNT(*)      | count                               |
 
-Multiple fields per function: `sum: Freight, Total` → `sum_Freight`, `sum_Total`.
+Multiple fields per function: `sum: Freight, Total`
+→ `sum_Freight`, `sum_Total`.
 
   order: sum_revenue desc, EmployeeID asc   → ORDER BY (multiple columns, mixed)
   having: count > 5                         → HAVING COUNT(*) > 5
@@ -153,7 +156,8 @@ Multiple fields per function: `sum: Freight, Total` → `sum_Freight`, `sum_Tota
 `size:` and `page:` apply to the aggregated result set.
 
 **Example — top 3 employees by revenue:**
-  read("group: EmployeeID\nsum: revenue\norder: sum_revenue desc\nsize: 3\n\n#? OrderDetails")
+  read("group: EmployeeID\nsum: revenue\norder: sum_revenue desc\n"
+       "size: 3\n\n#? OrderDetails")
 
 ## Error handling
 
@@ -292,7 +296,8 @@ def main() -> None:
             if not sql_path.exists():
                 raise SystemExit(
                     "Northwind demo database not found. "
-                    "northwind.sql is missing from the jmd_mcp_sql/ package directory."
+                    "northwind.sql is missing from the "
+                    "jmd_mcp_sql/ package directory."
                 )
             conn = sqlite3.connect(str(db_path))
             conn.executescript(sql_path.read_text(encoding="utf-8"))

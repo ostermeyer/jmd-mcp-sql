@@ -92,7 +92,6 @@ from jmd._query import Condition, QueryField
 
 from .schema import SchemaInspector, TableInfo
 
-
 # Aggregate function names recognised in query frontmatter.
 _AGG_FUNCS: tuple[str, ...] = ("sum", "avg", "min", "max")
 
@@ -225,7 +224,7 @@ def _rows_to_jmd(rows: list[dict[str, Any]], label: str) -> str:
 
 
 class SQLTranslator:
-    """Translates JMD documents into SQLite operations and back.
+    r"""Translates JMD documents into SQLite operations and back.
 
     Each public method corresponds to one MCP tool (read, write, delete).
     The constructor receives an open SQLite connection which is reused for
@@ -235,10 +234,11 @@ class SQLTranslator:
 
         conn = sqlite3.connect("mydb.db")
         t = SQLTranslator(conn)
-        result = t.read("#? Orders\\nShipCountry: Germany")
+        result = t.read("#? Orders\nShipCountry: Germany")
     """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
+        """Initialise the translator with an open SQLite connection."""
         self._conn = conn
         # sqlite3.Row makes fetchall() return dict-like objects so we can
         # call dict(row) without knowing column names in advance.
@@ -287,7 +287,10 @@ class SQLTranslator:
         if unknown:
             return serialize(
                 {"status": 400, "code": "bad_request",
-                 "message": f"Unknown column(s) {unknown!r} in table '{table.name}'"},
+                 "message": (
+                     f"Unknown column(s) {unknown!r}"
+                     f" in table '{table.name}'"
+                 )},
                 label="Error",
             )
         where, params = self._build_where(data)
@@ -327,7 +330,9 @@ class SQLTranslator:
         return _rows_to_jmd(rows, label)
 
     def _query(self, jmd_source: str) -> str:
-        """Execute a QBE query document (#?) with optional pagination or aggregation.
+        """Execute a QBE query document (#?) with optional pagination.
+
+        Also handles aggregation mode when frontmatter contains group/agg keys.
 
         Frontmatter keys control the execution mode:
 
@@ -401,7 +406,9 @@ class SQLTranslator:
         if table.is_view:
             return serialize(
                 {"status": 400, "code": "read_only",
-                 "message": f"'{table.name}' is a view and cannot be written to"},
+                 "message": (
+                     f"'{table.name}' is a view and cannot be written to"
+                 )},
                 label="Error",
             )
 
@@ -411,7 +418,10 @@ class SQLTranslator:
         if unknown:
             return serialize(
                 {"status": 400, "code": "bad_request",
-                 "message": f"Unknown column(s) {unknown!r} in table '{table.name}'"},
+                 "message": (
+                     f"Unknown column(s) {unknown!r}"
+                     f" in table '{table.name}'"
+                 )},
                 label="Error",
             )
         placeholders = ", ".join("?" * len(cols))
@@ -464,17 +474,24 @@ class SQLTranslator:
         if table.is_view:
             return serialize(
                 {"status": 400, "code": "read_only",
-                 "message": f"'{table.name}' is a view and cannot be deleted from"},
+                 "message": (
+                     f"'{table.name}' is a view and cannot be deleted from"
+                 )},
                 label="Error",
             )
 
-        identifiers = doc.identifiers if isinstance(doc.identifiers, dict) else {}
+        identifiers = (
+            doc.identifiers if isinstance(doc.identifiers, dict) else {}
+        )
         table_cols = {c.name for c in table.columns}
         unknown = [k for k in identifiers if k not in table_cols]
         if unknown:
             return serialize(
                 {"status": 400, "code": "bad_request",
-                 "message": f"Unknown column(s) {unknown!r} in table '{table.name}'"},
+                 "message": (
+                     f"Unknown column(s) {unknown!r}"
+                     f" in table '{table.name}'"
+                 )},
                 label="Error",
             )
         where, params = self._build_where(identifiers)
@@ -572,10 +589,13 @@ class SQLTranslator:
             with self._conn:
                 for f in scalar_fields:
                     if f.key not in existing_cols:
-                        sqlite_type = _JMD_TO_SQLITE.get(f.base_type.lower(), "TEXT")
+                        sqlite_type = _JMD_TO_SQLITE.get(
+                            f.base_type.lower(), "TEXT"
+                        )
                         self._conn.execute(
                             f"ALTER TABLE {_quote_identifier(table_name)}"
-                            f" ADD COLUMN {_quote_identifier(f.key)} {sqlite_type}"
+                            f" ADD COLUMN"
+                            f" {_quote_identifier(f.key)} {sqlite_type}"
                         )
                         added.append(f.key)
             self._schema = SchemaInspector(self._conn)
@@ -613,7 +633,7 @@ class SQLTranslator:
 
     def _paginated_jmd(
         self,
-        rows: list[dict],
+        rows: list[dict[str, Any]],
         label: str,
         total: int,
         page: int,
@@ -641,8 +661,8 @@ class SQLTranslator:
         table: TableInfo,
         label: str,
         where: str,
-        where_params: list,
-        fm: dict,
+        where_params: list[Any],
+        fm: dict[str, Any],
     ) -> str:
         """Build and execute a GROUP BY query from frontmatter aggregation keys.
 
@@ -751,7 +771,8 @@ class SQLTranslator:
                     if having_col not in result_cols:
                         raise ValueError(
                             f"Unknown result column '{having_col}' in "
-                            f"'having'. Available: {', '.join(sorted(result_cols))}"
+                            f"'having'. Available: "
+                            f"{', '.join(sorted(result_cols))}"
                         )
                     having_clauses.append(clause)
                     having_params.append(val)
@@ -803,7 +824,7 @@ class SQLTranslator:
             )
         return table
 
-    def _build_where(self, filters: dict[str, Any]) -> tuple[str, list]:
+    def _build_where(self, filters: dict[str, Any]) -> tuple[str, list[Any]]:
         """Build a WHERE clause from a plain key=value dict.
 
         All conditions are exact equality checks joined with AND.
@@ -816,7 +837,7 @@ class SQLTranslator:
 
     def _build_where_from_fields(
         self, fields: list[Any], table_cols: set[str]
-    ) -> tuple[str, list]:
+    ) -> tuple[str, list[Any]]:
         """Build a WHERE clause from a list of QueryField nodes (query mode).
 
         JMDQueryParser returns a heterogeneous list of QueryField,
@@ -851,7 +872,7 @@ class SQLTranslator:
 
     def _condition_to_sql(
         self, col: str, cond: Condition
-    ) -> tuple[str, list]:
+    ) -> tuple[str, list[Any]]:
         """Translate a single JMD Condition into a SQL fragment.
 
         JMD supports a rich filter syntax on query documents.  Each filter
@@ -899,13 +920,13 @@ class SQLTranslator:
         # Unknown operator — skip silently to stay forwards-compatible.
         return "", []
 
-    def _fetchall(self, sql: str, params: list) -> list[dict]:
+    def _fetchall(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
         """Execute a SELECT and return all rows as plain dicts."""
         cur = self._conn.execute(sql, params)
         return [dict(row) for row in cur.fetchall()]
 
     def _label_from_source(self, source: str) -> str:
-        """Extract the table label from the first heading line of a JMD document.
+        """Extract the table label from the first heading line of a JMD doc.
 
         The heading line encodes both the mode prefix and the label:
 
