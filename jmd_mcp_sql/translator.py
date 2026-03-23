@@ -41,14 +41,14 @@ Pagination
 ----------
 Frontmatter lines *before* the heading pass control parameters:
 
-    size: 50
+    page-size: 50
     page: 2
 
     #? Orders
 
 The translator runs two queries: COUNT(*) for metadata, then SELECT
 with LIMIT/OFFSET for the page.  Pagination metadata (``total``,
-``page``, ``pages``, ``page_size``) is returned as response frontmatter
+``page``, ``pages``, ``page-size``) is returned as response frontmatter
 — before the root heading — not as body fields.
 
 Aggregation
@@ -57,14 +57,14 @@ Aggregation is also expressed as frontmatter before the ``#?`` heading:
 
     group: EmployeeID
     sum: revenue
-    order: sum_revenue desc
-    size: 3
+    sort: sum_revenue desc
+    page-size: 3
 
     #? OrderDetails
 
 Supported keys: ``group`` (GROUP BY), ``sum``, ``avg``, ``min``,
 ``max`` (aggregate functions), ``count`` (COUNT(*)), ``having``
-(post-aggregation filter, comma-separated conditions), ``order``
+(post-aggregation filter, comma-separated conditions), ``sort``
 (ORDER BY, comma-separated columns with optional direction).
 Result columns for aggregate functions are named ``<func>_<field>``
 (e.g. ``sum_revenue``, ``avg_UnitPrice``).
@@ -484,11 +484,11 @@ class SQLTranslator:
         # count: true — return only the row count, no row data.
         if "count" in fm:
             total = self._conn.execute(count_sql, params).fetchone()[0]
-            return serialize({"count": total}, label=label)
+            return f"count: {total}\n\n" + serialize({}, label=label)
 
         # Paginated mode: frontmatter contains ``size`` (rows per page)
         # and optionally ``page`` (1-based, defaults to 1).
-        page_size = int(fm["size"]) if "size" in fm else 0
+        page_size = int(fm["page-size"]) if "page-size" in fm else 0
         if page_size > 0:
             page = max(1, int(fm.get("page", 1)))
             total = self._conn.execute(count_sql, params).fetchone()[0]
@@ -576,9 +576,34 @@ class SQLTranslator:
         # count (bare key without group) — return only the count, no rows.
         if "count" in fm:
             total = self._conn.execute(count_sql, params).fetchone()[0]
-            return serialize({"count": total}, label=doc.label)
+            return f"count: {total}\n\n" + serialize({}, label=doc.label)
 
-        page_size = int(fm["size"]) if "size" in fm else 0
+        # sort: ORDER BY (comma-separated "<col> [asc|desc]" pairs).
+        if "sort" in fm:
+            order_parts: list[str] = []
+            for item in str(fm["sort"]).split(","):
+                parts = item.strip().split()
+                if not parts:
+                    continue
+                col = parts[0]
+                if col not in table_cols:
+                    available = ", ".join(sorted(table_cols))
+                    raise ValueError(
+                        f"Unknown column '{col}' in 'sort'. "
+                        f"Available: {available}"
+                    )
+                direction = (
+                    parts[1].upper()
+                    if len(parts) > 1 and parts[1].upper() in ("ASC", "DESC")
+                    else "ASC"
+                )
+                order_parts.append(
+                    f"{_quote_identifier(col)} {direction}"
+                )
+            if order_parts:
+                base_sql += " ORDER BY " + ", ".join(order_parts)
+
+        page_size = int(fm["page-size"]) if "page-size" in fm else 0
         if page_size > 0:
             page = max(1, int(fm.get("page", 1)))
             total = self._conn.execute(count_sql, params).fetchone()[0]
@@ -864,7 +889,7 @@ class SQLTranslator:
             f"total: {total}\n"
             f"page: {page}\n"
             f"pages: {pages}\n"
-            f"page_size: {page_size}\n"
+            f"page-size: {page_size}\n"
         )
         body = serialize({"data": rows}, label=label)
         return fm + "\n" + body
@@ -880,7 +905,7 @@ class SQLTranslator:
         """Build and execute a GROUP BY query from frontmatter aggregation keys.
 
         Translates frontmatter keys ``group``, ``sum``, ``avg``, ``min``,
-        ``max``, ``count``, ``having``, and ``order`` into a single SQL
+        ``max``, ``count``, ``having``, and ``sort`` into a single SQL
         SELECT … GROUP BY … HAVING … ORDER BY statement.
 
         Result columns for aggregate functions are named ``<func>_<field>``
@@ -891,14 +916,14 @@ class SQLTranslator:
         reference result column aliases (e.g. ``having: count > 5,
         sum_Freight > 1000``).  Each condition is parameterized.
 
-        ``order:`` accepts comma-separated ``<column> [asc|desc]`` pairs
+        ``sort:`` accepts comma-separated ``<column> [asc|desc]`` pairs
         referencing any result column (grouping key or aggregate alias).
 
         All field references are validated against the table schema before
         any SQL is generated.  Unknown fields raise a ``ValueError`` which
         the caller converts to a ``# Error`` document.
 
-        Pagination via ``size:`` / ``page:`` is applied to the aggregated
+        Pagination via ``page-size:`` / ``page:`` is applied to the aggregated
         result set using a subquery COUNT.
 
         If ``select:`` is present it filters the result columns after
@@ -937,14 +962,18 @@ class SQLTranslator:
         for func in _AGG_FUNCS:
             if func not in fm:
                 continue
-            for col in str(fm[func]).split(","):
-                col = col.strip()
-                if not col:
+            for raw_col in str(fm[func]).split(","):
+                raw_col = raw_col.strip()
+                if not raw_col:
                     continue
-                _require_table_col(col, func)
-                alias = f"{func}_{col}"
+                expr, alias = _parse_agg_expr(raw_col)
+                # For simple (non-join) aggregation, only plain column names
+                # are valid — no arithmetic expressions.
+                _require_table_col(expr, func)
+                if alias is None:
+                    alias = f"{func}_{expr}"
                 select_parts.append(
-                    f"{func.upper()}({_quote_identifier(col)})"
+                    f"{func.upper()}({_quote_identifier(expr)})"
                     f" AS {_quote_identifier(alias)}"
                 )
 
@@ -960,10 +989,14 @@ class SQLTranslator:
         for func in _AGG_FUNCS:
             if func not in fm:
                 continue
-            for col in str(fm[func]).split(","):
-                col = col.strip()
-                if col:
-                    result_cols.add(f"{func}_{col}")
+            for raw_col in str(fm[func]).split(","):
+                raw_col = raw_col.strip()
+                if raw_col:
+                    _, alias = _parse_agg_expr(raw_col)
+                    col_name = raw_col.split()[0] if alias is None else ""
+                    result_cols.add(
+                        alias if alias is not None else f"{func}_{col_name}"
+                    )
 
         select_clause = ", ".join(select_parts)
         sql = f'SELECT {select_clause} FROM {_quote_identifier(table.name)}'
@@ -996,8 +1029,8 @@ class SQLTranslator:
             sql += " HAVING " + " AND ".join(having_clauses)
 
         order_parts: list[str] = []
-        if "order" in fm:
-            for item in str(fm["order"]).split(","):
+        if "sort" in fm:
+            for item in str(fm["sort"]).split(","):
                 parts = item.strip().split()
                 if not parts:
                     continue
@@ -1029,7 +1062,7 @@ class SQLTranslator:
                             f"Available: {available}"
                         )
 
-        page_size = int(fm["size"]) if "size" in fm else 0
+        page_size = int(fm["page-size"]) if "page-size" in fm else 0
         if page_size > 0:
             page = max(1, int(fm.get("page", 1)))
             count_sql = f"SELECT COUNT(*) FROM ({sql})"
@@ -1228,8 +1261,8 @@ class SQLTranslator:
             sql += " HAVING " + " AND ".join(having_clauses)
 
         order_parts: list[str] = []
-        if "order" in fm:
-            for item in str(fm["order"]).split(","):
+        if "sort" in fm:
+            for item in str(fm["sort"]).split(","):
                 parts = item.strip().split()
                 if not parts:
                     continue
@@ -1261,7 +1294,7 @@ class SQLTranslator:
                             f"Available: {available}"
                         )
 
-        page_size = int(fm["size"]) if "size" in fm else 0
+        page_size = int(fm["page-size"]) if "page-size" in fm else 0
         if page_size > 0:
             page = max(1, int(fm.get("page", 1)))
             count_sql = f"SELECT COUNT(*) FROM ({sql})"
@@ -1401,9 +1434,9 @@ class SQLTranslator:
             if where:
                 count_sql += f" WHERE {where}"
             total = self._conn.execute(count_sql, params).fetchone()[0]
-            return serialize({"count": total}, label=label)
+            return f"count: {total}\n\n" + serialize({}, label=label)
 
-        page_size = int(fm["size"]) if "size" in fm else 0
+        page_size = int(fm["page-size"]) if "page-size" in fm else 0
         if page_size > 0:
             page = max(1, int(fm.get("page", 1)))
             count_sql = (

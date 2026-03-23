@@ -159,7 +159,7 @@ Always use pagination when querying tables that may contain many rows.
 Use frontmatter fields before the `#?` heading to control pagination:
 
 ```text
-read("size: 50\npage: 1\n\n#? Orders")
+read("page-size: 50\npage: 1\n\n#? Orders")
 ```
 
 The response carries pagination metadata as **frontmatter** — before the root heading:
@@ -168,7 +168,7 @@ The response carries pagination metadata as **frontmatter** — before the root 
 total: 830
 page: 1
 pages: 17
-page_size: 50
+page-size: 50
 
 # Orders
 ## data[]
@@ -185,8 +185,9 @@ read("count: true\n\n#? Orders")
 Returns:
 
 ```text
-# Orders
 count: 830
+
+# Orders
 ```
 
 Use `total` and `pages` to determine whether to fetch more pages.
@@ -198,7 +199,7 @@ Use `select:` frontmatter to return only specific columns. This keeps
 responses small and context windows focused.
 
 ```text
-read("select: OrderID, EmployeeID\nsize: 50\n\n#? Orders")
+read("select: OrderID, EmployeeID\npage-size: 50\n\n#? Orders")
 ```
 
 Works with both `#` (data) and `#?` (query) documents. When combined with
@@ -211,7 +212,7 @@ The value is `<TableName> on <JoinColumn>` (INNER JOIN, equi-join on a
 column that exists in both tables).
 
 ```text
-read("join: Order Details on OrderID\nsum: UnitPrice * Quantity * (1 - Discount) as revenue\ngroup: EmployeeID\norder: revenue desc\n\n#? Orders")
+read("join: Order Details on OrderID\nsum: UnitPrice * Quantity * (1 - Discount) as revenue\ngroup: EmployeeID\nsort: revenue desc\n\n#? Orders")
 ```
 
 **Multiple joins** — comma-separated in a single `join:` value:
@@ -260,18 +261,18 @@ Multiple fields per function: `sum: Freight, Total` → `sum_Freight` and `sum_T
 
 | Frontmatter | Meaning |
 | --- | --- |
-| `order: sum_revenue desc, EmployeeID asc` | ORDER BY (multiple columns, mixed) |
+| `sort: sum_revenue desc, EmployeeID asc` | ORDER BY (multiple columns, mixed) |
 | `having: count > 5` | HAVING COUNT(*) > 5 |
 | `having: sum_Freight > 1000, count > 2` | HAVING … AND … (comma = AND) |
 
 `having:` supports: `>`, `>=`, `<`, `<=`, `=`.
-`order:` references any result column — grouping keys or aggregate aliases.
-`size:` and `page:` apply to the aggregated result set.
+`sort:` references any result column — grouping keys or aggregate aliases.
+`page-size:` and `page:` apply to the aggregated result set.
 
 **Example — top 3 employees by revenue:**
 
 ```text
-read("group: EmployeeID\nsum: revenue\norder: sum_revenue desc\nsize: 3\n\n#? OrderDetails")
+read("group: EmployeeID\nsum: revenue\nsort: sum_revenue desc\npage-size: 3\n\n#? OrderDetails")
 ```
 
 ## Error Handling
