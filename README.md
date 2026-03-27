@@ -14,9 +14,20 @@ All inputs and outputs are JMD documents. The LLM speaks JMD — no SQL required
 
 ## Installation
 
+Install the latest version directly from GitHub:
+
 ```bash
-pip install jmd-mcp-sql
+pip install git+https://github.com/ostermeyer/jmd-mcp-sql.git
 ```
+
+Or pin a specific release:
+
+```bash
+pip install git+https://github.com/ostermeyer/jmd-mcp-sql.git@v0.1
+```
+
+Pre-built packages are attached to each
+[GitHub Release](https://github.com/ostermeyer/jmd-mcp-sql/releases).
 
 ## Configuration
 

@@ -13,7 +13,7 @@ requires-python = ">=3.10"
 keywords = ["jmd", "mcp", "sqlite", "llm", "natural-language", "database"]
 dependencies = [
     "mcp>=1.0",
-    "jmd-format>=0.3",
+    "jmd-format @ git+https://github.com/ostermeyer/jmd-impl.git",
 ]
 
 [project.urls]
