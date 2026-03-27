@@ -275,12 +275,12 @@ wheels = [
 
 [[package]]
 name = "jmd-format"
-version = "0.3.1"
+version = "0.3"
 source = { editable = "../jmd-impl" }
 
 [[package]]
 name = "jmd-mcp-sql"
-version = "0.1.0"
+version = "0.3"
 source = { editable = "." }
 dependencies = [
     { name = "jmd-format" },
