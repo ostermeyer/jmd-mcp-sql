@@ -700,8 +700,8 @@ class SQLTranslator:
                 table or view.
 
         Returns:
-            A ``# Result`` document with the number of deleted rows, or
-            a ``# Error`` document if the operation is invalid.
+            The deleted record as a JMD data document, or a ``# Error``
+            document if the operation is invalid or the record is not found.
         """
         if jmd_mode(jmd_source) == "schema":
             return self._delete_schema(jmd_source)
@@ -742,12 +742,26 @@ class SQLTranslator:
                 label="Error",
             )
 
-        sql = f'DELETE FROM {_quote_identifier(table.name)} WHERE {where}'
-        cur = self._conn.execute(sql, params)
-        self._conn.commit()
-        return serialize(
-            {"deleted": cur.rowcount, "table": table.name}, label="Result"
+        # Read the row before deletion so we can return it as the response.
+        row = self._conn.execute(
+            f'SELECT * FROM {_quote_identifier(table.name)} WHERE {where}',
+            params,
+        ).fetchone()
+        if row is None:
+            return serialize(
+                {"status": 404, "code": "not_found",
+                 "message": (
+                     f"No matching record in '{table.name}'"
+                 )},
+                label="Error",
+            )
+
+        self._conn.execute(
+            f'DELETE FROM {_quote_identifier(table.name)} WHERE {where}',
+            params,
         )
+        self._conn.commit()
+        return _row_to_jmd(dict(row), doc.label)
 
     # ------------------------------------------------------------------
     # Schema operations (#!)

@@ -656,13 +656,14 @@ class TestDeleteData:
     """Tests for delete-mode documents (#- Label)."""
 
     def test_delete_matching_row(self, nw_rw: SQLTranslator) -> None:
-        """Deleting a row by PK returns deleted: 1."""
-        # First insert a row we can safely delete
+        """Deleting a row by PK returns the deleted record as a data document."""
         nw_rw.write(
             "# Orders\nOrderID: 88888\nShipCountry: Deleteme"
         )
         result = nw_rw.delete("#- Orders\nOrderID: 88888")
-        assert "deleted: 1" in result
+        assert "# Orders" in result
+        assert "88888" in result
+        assert "Deleteme" in result
 
     def test_delete_removes_row(self, nw_rw: SQLTranslator) -> None:
         """After deletion the row is no longer readable."""
@@ -673,12 +674,13 @@ class TestDeleteData:
         result = nw_rw.read("# Orders\nOrderID: 88888")
         assert "not_found" in result
 
-    def test_delete_no_match_returns_zero(
+    def test_delete_no_match_returns_404(
         self, nw_rw: SQLTranslator
     ) -> None:
-        """Deleting with no matching rows returns deleted: 0."""
+        """Deleting a non-existent row returns a 404 Error."""
         result = nw_rw.delete("#- Orders\nOrderID: 99999")
-        assert "deleted: 0" in result
+        assert "# Error" in result
+        assert "404" in result
 
     def test_delete_without_filter_returns_error(
         self, nw_rw: SQLTranslator
