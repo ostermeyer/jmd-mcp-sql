@@ -84,7 +84,7 @@ class TestReadData:
     def test_multiple_matches_returns_array(self, nw: SQLTranslator) -> None:
         """Multiple matches return an array document."""
         result = nw.read("# Orders\nShipCountry: France")
-        assert "## data[]" in result or result.startswith("# [")
+        assert result.startswith("# Orders[]")
 
     def test_no_match_returns_404(self, nw: SQLTranslator) -> None:
         """No matching rows returns a 404 Error document."""

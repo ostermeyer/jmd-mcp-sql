@@ -377,9 +377,7 @@ def _row_to_jmd(row: dict[str, Any], label: str) -> str:
 
 def _rows_to_jmd(rows: list[dict[str, Any]], label: str) -> str:
     """Serialize a list of result rows as a JMD array document."""
-    # The "[]" suffix tells jmd-format that this is a list document,
-    # producing "## label[]\n- key: value\n  ..." output.
-    return serialize(rows, label=label + "[]")
+    return serialize(rows, label=label)
 
 
 class SQLTranslator:
