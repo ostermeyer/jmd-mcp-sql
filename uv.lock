@@ -275,7 +275,7 @@ wheels = [
 
 [[package]]
 name = "jmd-format"
-version = "0.4"
+version = "0.4.1"
 source = { editable = "../jmd-impl" }
 dependencies = [
     { name = "lxml" },
@@ -286,7 +286,7 @@ requires-dist = [{ name = "lxml", specifier = ">=5.0" }]
 
 [[package]]
 name = "jmd-mcp-sql"
-version = "0.3"
+version = "0.4"
 source = { editable = "." }
 dependencies = [
     { name = "jmd-format" },
