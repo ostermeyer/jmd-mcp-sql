@@ -27,6 +27,9 @@ jmd-mcp-sql = "jmd_mcp_sql.server:main"
 where = ["."]
 include = ["jmd_mcp_sql*"]
 
+[tool.setuptools.package-data]
+jmd_mcp_sql = ["*.sql"]
+
 [tool.uv.sources]
 jmd-format = { path = "../jmd-impl", editable = true }
 

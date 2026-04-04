@@ -2,6 +2,26 @@
 
 MCP server that exposes a SQLite database through three JMD tools — a natural language database interface for LLM-driven workflows.
 
+## What is JMD?
+
+[JMD](https://github.com/ostermeyer/jmd-spec) (JSON Markdown) is a lightweight
+document format that combines Markdown headings with `key: value` pairs. It is
+designed as a structured data format that LLMs can read and write naturally —
+without JSON brackets or SQL syntax. A heading line sets the document type and
+target table; the body carries the data:
+
+```text
+# Order
+id: 42
+status: shipped
+total: 149.99
+```
+
+A prefix on the heading selects the operation: `#` for data, `#?` for queries,
+`#!` for schema, `#-` for deletes. See the
+[JMD specification](https://github.com/ostermeyer/jmd-spec) for the full format
+definition.
+
 ## Tools
 
 | Tool | `#` Data | `#?` Query | `#!` Schema | `#-` Delete |
@@ -14,53 +34,133 @@ All inputs and outputs are JMD documents. The LLM speaks JMD — no SQL required
 
 ## Installation
 
-Install the latest version directly from GitHub:
+Install from PyPI:
+
+```bash
+pip install jmd-mcp-sql
+```
+
+Or with [uv](https://docs.astral.sh/uv/) (no manual install needed — `uvx` fetches it on demand):
+
+```bash
+uvx jmd-mcp-sql
+```
+
+Alternatively, install directly from GitHub:
 
 ```bash
 pip install git+https://github.com/ostermeyer/jmd-mcp-sql.git
 ```
 
-Or pin a specific release:
-
-```bash
-pip install git+https://github.com/ostermeyer/jmd-mcp-sql.git@v0.1
-```
-
-Pre-built packages are attached to each
-[GitHub Release](https://github.com/ostermeyer/jmd-mcp-sql/releases).
-
 ## Configuration
 
-### With Claude Code
+The server runs as a **stdio-based MCP server**. Without arguments it starts with
+the bundled Northwind demo database. Pass a path to use your own SQLite file:
 
-Add to your MCP configuration (`~/.claude/settings.json`):
-
-```json
-{
-  "mcpServers": {
-    "sql": {
-      "command": "jmd-mcp-sql",
-      "args": ["/path/to/your.db"]
-    }
-  }
-}
-```
-
-Or use the bundled Northwind demo database (no argument needed):
-
-```json
-{
-  "mcpServers": {
-    "sql": {
-      "command": "jmd-mcp-sql"
-    }
-  }
-}
+```bash
+jmd-mcp-sql /path/to/your.db
 ```
 
 The demo database ships as `northwind.sql` (plain text, version-controlled). On the
-first run without an explicit path, the server creates `northwind.db` from that file
-automatically. The `.db` file is not tracked by git.
+first run without an explicit path, the server creates `northwind.db` from that dump
+automatically.
+
+### Claude Code
+
+Add the server via CLI:
+
+```bash
+claude mcp add --transport stdio sql -- uvx jmd-mcp-sql
+```
+
+With a custom database:
+
+```bash
+claude mcp add --transport stdio sql -- uvx jmd-mcp-sql /path/to/your.db
+```
+
+This writes a `.mcp.json` in the project root (shareable via version control).
+You can also create it manually:
+
+```json
+{
+  "mcpServers": {
+    "sql": {
+      "command": "uvx",
+      "args": ["jmd-mcp-sql"]
+    }
+  }
+}
+```
+
+### Claude Desktop / Cowork
+
+Claude Cowork runs inside Claude Desktop. MCP servers configured in the Desktop
+config are automatically available in Cowork sessions.
+
+Edit `claude_desktop_config.json`:
+
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "sql": {
+      "command": "uvx",
+      "args": ["jmd-mcp-sql"]
+    }
+  }
+}
+```
+
+With a custom database:
+
+```json
+{
+  "mcpServers": {
+    "sql": {
+      "command": "uvx",
+      "args": ["jmd-mcp-sql", "/path/to/your.db"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop after saving the file. The server will appear as a tool
+in both Chat and Cowork mode.
+
+### VS Code
+
+Create `.vscode/mcp.json` in the project root:
+
+```json
+{
+  "servers": {
+    "sql": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["jmd-mcp-sql"]
+    }
+  }
+}
+```
+
+Alternatively, add it to your VS Code `settings.json` (user or workspace):
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "sql": {
+        "type": "stdio",
+        "command": "uvx",
+        "args": ["jmd-mcp-sql"]
+      }
+    }
+  }
+}
+```
 
 ## JMD Document Syntax
 
