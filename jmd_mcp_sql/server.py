@@ -1,8 +1,9 @@
 """JMD MCP server for SQLite.
 
 This module wires together the MCP framework (FastMCP), the SQL translator,
-and the database connection.  It exposes three tools that an LLM can call:
+and the database connection.  It exposes four tools that an LLM can call:
 
+    open   — open a SQLite database file or show current database info
     read   — query records, filter with QBE, or describe table schemas
     write  — insert/replace records or create/extend tables
     delete — remove records or drop tables
@@ -25,15 +26,17 @@ from __future__ import annotations
 import argparse
 import sqlite3
 from pathlib import Path
+from typing import Any
 
-from jmd import serialize
+from jmd import jmd_to_dict, serialize
 from mcp.server.fastmcp import FastMCP
 
+from .config import load as load_config
 from .translator import SQLTranslator
 
 _INSTRUCTIONS = """
-This server exposes a SQLite database through three tools —
-read, write, delete — using JMD (JSON Markdown) as the data format.
+This server exposes a SQLite database through four tools —
+open, read, write, delete — using JMD (JSON Markdown) as the data format.
 
 ## JMD document syntax
 
@@ -47,6 +50,19 @@ and table name, followed by key: value pairs (one per line):
 
   key: value         → string, integer, or float — inferred automatically
   key: true/false    → boolean
+
+## Opening a database
+
+Open a SQLite database file at any time:
+
+  open("# Database\npath: /path/to/mydb.db")
+
+If the file does not exist, a new empty database is created.
+The previous database is closed automatically.
+
+Check which database is currently active:
+
+  open("# Database")
 
 ## Discovering the database
 
@@ -126,7 +142,8 @@ Use `total` and `pages` to determine whether to fetch more pages.
 
 Returns: `count: 830\n\n# Orders`
 
-**Rule of thumb:** Use `page-size: 50` for any table you haven't inspected before.
+**Rule of thumb:** Use `page-size: 50` for any table you haven't
+inspected before.
 For tables with fewer than ~20 rows (e.g. Categories, Shippers) pagination is
 optional.
 
@@ -217,6 +234,8 @@ mcp = FastMCP("jmd-mcp-sql", instructions=_INSTRUCTIONS)
 # Set by main() before mcp.run(); None while the module is imported without
 # a running server (e.g. during tests or type-checking).
 _translator: SQLTranslator | None = None
+_db_path: Path | None = None
+_config: dict[str, str | None] = {}
 
 
 def _t() -> SQLTranslator:
@@ -224,6 +243,136 @@ def _t() -> SQLTranslator:
     if _translator is None:
         raise RuntimeError("Server not initialized — call main() first")
     return _translator
+
+
+def _resolve_db_path(raw: str) -> Path:
+    """Resolve and validate a database path against the configured root.
+
+    Args:
+        raw: The path string from the JMD document.
+
+    Returns:
+        The resolved absolute ``Path``.
+
+    Raises:
+        ValueError: If the path is outside the configured root.
+    """
+    resolved = Path(raw).expanduser().resolve()
+    root = _config.get("root")
+    if root is not None:
+        root_resolved = Path(root).expanduser().resolve()
+        if not resolved.is_relative_to(root_resolved):
+            msg = (
+                f"Path {resolved} is outside the allowed "
+                f"root {root_resolved}"
+            )
+            raise ValueError(msg)
+    return resolved
+
+
+def _open_db(db_path: Path) -> str:
+    """Open a SQLite database and set it as the active connection.
+
+    Closes the previous connection if one exists.  If the file does
+    not exist, SQLite creates a new empty database.
+
+    Args:
+        db_path: Resolved, validated absolute path.
+
+    Returns:
+        JMD document with database metadata in frontmatter and table
+        list in the body.
+    """
+    global _translator, _db_path
+
+    created = not db_path.exists()
+
+    # Close previous connection cleanly.
+    if _translator is not None:
+        _translator.close()
+
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    _translator = SQLTranslator(conn)
+    _db_path = db_path
+
+    return _db_status(created=created)
+
+
+def _db_status(*, created: bool = False) -> str:
+    """Build a JMD response describing the active database.
+
+    Args:
+        created: Whether the database file was just created.
+
+    Returns:
+        JMD document with frontmatter metadata and table list.
+    """
+    tables = _t()._schema.tables()
+    table_names = sorted(tables.keys())
+
+    # --- frontmatter (transport metadata) ---
+    parts: list[str] = [f"path: {_db_path}"]
+    parts.append(f"table-count: {len(table_names)}")
+    if created:
+        parts.append("created: true")
+    parts.append("")  # blank line separates frontmatter from heading
+
+    # --- body ---
+    parts.append("# Database")
+    if table_names:
+        parts.append("## tables[]")
+        for name in table_names:
+            parts.append(f"- {name}")
+
+    return "\n".join(parts) + "\n"
+
+
+@mcp.tool(name="open")
+def open_database(document: str) -> str:
+    """Open a SQLite database file or show current database info.
+
+    Data document (# Database) with a path field opens the database
+    and makes it the active connection.  If the file does not exist,
+    a new empty database is created.  The previous database is closed
+    automatically.
+
+        # Database
+        path: /path/to/mydb.db
+
+    Data document (# Database) without fields returns information
+    about the currently active database.
+
+        # Database
+    """
+    try:
+        parsed: Any = jmd_to_dict(document)
+        path_value = parsed.get("path") if isinstance(parsed, dict) else None
+
+        if path_value is None:
+            # Status query.
+            if _db_path is None:
+                return serialize(
+                    {
+                        "status": 400,
+                        "code": "no_database",
+                        "message": "No database is currently open",
+                    },
+                    label="Error",
+                )
+            return _db_status()
+
+        db_path = _resolve_db_path(str(path_value))
+        return _open_db(db_path)
+    except ValueError as exc:
+        return serialize(
+            {"status": 403, "code": "path_denied", "message": str(exc)},
+            label="Error",
+        )
+    except Exception as exc:
+        return serialize(
+            {"status": 400, "code": "open_failed", "message": str(exc)},
+            label="Error",
+        )
 
 
 @mcp.tool()
@@ -313,6 +462,10 @@ def delete(document: str) -> str:
 
 def main() -> None:
     """Entry point: parse arguments, open the database, and start the server."""
+    global _translator, _db_path, _config
+
+    _config = load_config()
+
     parser = argparse.ArgumentParser(description="JMD MCP server for SQLite")
     parser.add_argument(
         "db",
@@ -342,11 +495,11 @@ def main() -> None:
             conn.executescript(sql_path.read_text(encoding="utf-8"))
             conn.close()
 
-    global _translator
     # check_same_thread=False is safe here because FastMCP processes one
     # request at a time over stdio; there is no concurrent access.
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     _translator = SQLTranslator(conn)
+    _db_path = db_path.resolve()
 
     mcp.run()
 

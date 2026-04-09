@@ -1,6 +1,6 @@
 # jmd-mcp-sql
 
-MCP server that exposes a SQLite database through three JMD tools — a natural language database interface for LLM-driven workflows.
+MCP server that exposes a SQLite database through four JMD tools — a natural language database interface for LLM-driven workflows.
 
 ## What is JMD?
 
@@ -26,6 +26,7 @@ definition.
 
 | Tool | `#` Data | `#?` Query | `#!` Schema | `#-` Delete |
 | --- | --- | --- | --- | --- |
+| `open` | Open database / show status | — | — | — |
 | `read` | SELECT by fields | SELECT with filters + aggregation | PRAGMA (describe table) | — |
 | `write` | INSERT OR REPLACE | — | CREATE / ALTER TABLE | — |
 | `delete` | — | — | DROP TABLE | DELETE WHERE |
@@ -176,6 +177,50 @@ followed by `key: value` pairs (one per line):
 key: value         → string, integer, or float — inferred automatically
 key: true/false    → boolean
 ```
+
+## Opening a Database
+
+Open a different SQLite database at any time:
+
+```text
+open("# Database\npath: /path/to/mydb.db")
+```
+
+If the file does not exist, a new empty database is created. The previous
+database is closed automatically. The response uses frontmatter for metadata
+and lists tables in the body:
+
+```text
+path: /path/to/mydb.db
+table-count: 3
+
+# Database
+## tables[]
+- Customers
+- Orders
+- Products
+```
+
+Check which database is currently active:
+
+```text
+open("# Database")
+```
+
+## Path Restriction
+
+The server reads optional settings from `~/.config/jmd/sql.jmd`:
+
+```text
+# Config
+root: /Users/me/data
+```
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `root` | *(none)* | Restricts `open` to databases under this directory tree |
+
+Without a config file, no restrictions apply and the server accepts any path.
 
 ## Discovering the Database
 

@@ -404,6 +404,10 @@ class SQLTranslator:
         self._conn.create_function("REGEXP", 2, _regexp)
         self._schema = SchemaInspector(conn)
 
+    def close(self) -> None:
+        """Close the underlying database connection."""
+        self._conn.close()
+
     # ------------------------------------------------------------------
     # read — dispatches to _query (#?), _read_schema (#!),
     #        or direct SELECT (#, with optional pagination)

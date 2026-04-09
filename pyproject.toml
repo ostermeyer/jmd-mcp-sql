@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jmd-mcp-sql"
-version = "0.4.1"
+version = "0.5.0"
 description = "JMD-based MCP server for SQLite — natural language database interface"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -58,4 +58,11 @@ testpaths = ["tests"]
 [tool.mypy]
 strict = true
 mypy_path = "../jmd-impl"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.20.0",
+    "pytest>=9.0.3",
+    "ruff>=0.15.10",
+]
 
