@@ -73,7 +73,8 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from jmd import (
@@ -373,14 +374,119 @@ _JMD_TO_SQLITE: dict[str, str] = {
 # -- Known frontmatter keys per operation (for WP2 tolerance) ------
 
 _KNOWN_FM_READ_DATA: frozenset[str] = frozenset({
-    "page-size", "page", "count", "select",
+    "page-size", "page", "count", "select", "debug",
 })
 _KNOWN_FM_READ_QUERY: frozenset[str] = frozenset({
     "select", "join", "sum", "avg", "min", "max", "count",
-    "group", "having", "sort", "page-size", "page",
+    "group", "having", "sort", "page-size", "page", "debug",
 })
-_KNOWN_FM_WRITE: frozenset[str] = frozenset()
-_KNOWN_FM_DELETE: frozenset[str] = frozenset({"confirm"})
+_KNOWN_FM_WRITE: frozenset[str] = frozenset({"debug"})
+_KNOWN_FM_DELETE: frozenset[str] = frozenset({
+    "confirm", "debug",
+})
+
+# -- Debug mode infrastructure ------------------------------------
+
+_KNOWN_DEBUG_VALUES: frozenset[str] = frozenset({
+    "sql", "timing", "table", "filters", "plan",
+    "resolved", "coercions",
+})
+
+
+@dataclass
+class DebugInfo:
+    """Collects debug output during a single operation."""
+
+    requested: frozenset[str]
+    unknown: list[str]
+    sql: str = ""
+    timing_ms: float = 0.0
+    table: str = ""
+    filters: list[tuple[str, str]] = field(
+        default_factory=list,
+    )
+    plan: str = ""
+    resolved: list[tuple[str, str]] = field(
+        default_factory=list,
+    )
+    coercions: list[tuple[str, str]] = field(
+        default_factory=list,
+    )
+
+    @property
+    def active(self) -> bool:
+        """Whether any debug output was requested."""
+        return bool(self.requested)
+
+    def wants(self, key: str) -> bool:
+        """Check if a specific debug value was requested."""
+        return key in self.requested
+
+    def to_frontmatter(self) -> str:
+        """Render debug output as JMD frontmatter lines."""
+        parts: list[str] = []
+        if self.unknown:
+            parts.append(
+                "debug-unknown: " + ", ".join(self.unknown)
+            )
+        if self.wants("sql") and self.sql:
+            parts.append(f"debug-sql: {self.sql}")
+        if self.wants("timing"):
+            parts.append(
+                f"debug-timing: {self.timing_ms:.1f}ms"
+            )
+        if self.wants("table") and self.table:
+            parts.append(f"debug-table: {self.table}")
+        if self.wants("plan") and self.plan:
+            parts.append(f"debug-plan: {self.plan}")
+        if self.wants("filters") and self.filters:
+            for fld, translation in self.filters:
+                parts.append(
+                    f"debug-filter-{fld}: {translation}"
+                )
+        if self.wants("resolved") and self.resolved:
+            for key, translation in self.resolved:
+                parts.append(
+                    f"debug-resolved-{key}: {translation}"
+                )
+        if self.wants("coercions") and self.coercions:
+            for fld, info in self.coercions:
+                parts.append(
+                    f"debug-coercion-{fld}: {info}"
+                )
+        return "\n".join(parts)
+
+
+def _parse_debug(fm: dict[str, Any]) -> DebugInfo:
+    """Parse the ``debug:`` frontmatter key.
+
+    Returns a :class:`DebugInfo` with the requested values
+    separated into known and unknown.  If ``debug`` is not
+    present in *fm*, returns an inactive DebugInfo.
+    """
+    raw = fm.get("debug")
+    if raw is None:
+        return DebugInfo(
+            requested=frozenset(), unknown=[]
+        )
+    values = {
+        v.strip()
+        for v in str(raw).split(",")
+        if v.strip()
+    }
+    known = frozenset(values & _KNOWN_DEBUG_VALUES)
+    unknown = sorted(values - _KNOWN_DEBUG_VALUES)
+    return DebugInfo(requested=known, unknown=unknown)
+
+
+def _prepend_debug(
+    response: str, dbg: DebugInfo,
+) -> str:
+    """Prepend debug frontmatter to *response* if active."""
+    fm = dbg.to_frontmatter()
+    if not fm:
+        return response
+    return f"{fm}\n\n{response}"
 
 
 def _check_frontmatter(
@@ -499,11 +605,14 @@ class SQLTranslator:
         parser = JMDParser()
         data = parser.parse(jmd_source)
         fm = parser.frontmatter
+        dbg = _parse_debug(fm)
         ignored = _check_frontmatter(
             fm, _KNOWN_FM_READ_DATA, "observable"
         )
         label = self._label_from_source(jmd_source)
         table = self._resolve_or_error(label)
+        if dbg.wants("table"):
+            dbg.table = table.name
 
         table_cols = {c.name for c in table.columns}
         unknown = [k for k in data if k not in table_cols]
@@ -525,9 +634,12 @@ class SQLTranslator:
             if sel_cols:
                 for col in sel_cols:
                     if col not in table_cols:
-                        available = ", ".join(sorted(table_cols))
+                        available = ", ".join(
+                            sorted(table_cols)
+                        )
                         raise ValueError(
-                            f"Unknown column '{col}' in 'select'. "
+                            f"Unknown column '{col}'"
+                            " in 'select'. "
                             f"Available: {available}"
                         )
                 select_clause = ", ".join(
@@ -539,50 +651,96 @@ class SQLTranslator:
             f' FROM {_quote_identifier(table.name)}'
         )
         count_sql = (
-            f'SELECT COUNT(*) FROM {_quote_identifier(table.name)}'
+            f'SELECT COUNT(*)'
+            f' FROM {_quote_identifier(table.name)}'
         )
         if where:
             base_sql += f" WHERE {where}"
             count_sql += f" WHERE {where}"
 
-        # count: true — return only the row count, no row data.
+        # count: true — return only the row count, no data.
         if "count" in fm:
-            total = self._conn.execute(count_sql, params).fetchone()[0]
-            resp = f"count: {total}\n\n" + serialize({}, label=label)
-            return _prepend_ignored_keys(resp, ignored)
+            t0 = time.perf_counter()
+            total = self._conn.execute(
+                count_sql, params
+            ).fetchone()[0]
+            if dbg.active:
+                dbg.timing_ms = (
+                    (time.perf_counter() - t0) * 1000
+                )
+                dbg.sql = count_sql
+            resp = (
+                f"count: {total}\n\n"
+                + serialize({}, label=label)
+            )
+            return _prepend_debug(
+                _prepend_ignored_keys(resp, ignored), dbg
+            )
 
-        # Paginated mode: frontmatter contains ``size`` (rows per page)
-        # and optionally ``page`` (1-based, defaults to 1).
-        page_size = int(fm["page-size"]) if "page-size" in fm else 0
+        # Paginated mode.
+        page_size = (
+            int(fm["page-size"]) if "page-size" in fm else 0
+        )
         if page_size > 0:
             page = max(1, int(fm.get("page", 1)))
-            total = self._conn.execute(count_sql, params).fetchone()[0]
+            total = self._conn.execute(
+                count_sql, params
+            ).fetchone()[0]
             offset = (page - 1) * page_size
-            rows = self._fetchall(
-                base_sql + f" LIMIT {page_size} OFFSET {offset}",
-                params,
+            exec_sql = (
+                base_sql
+                + f" LIMIT {page_size} OFFSET {offset}"
             )
-            return _prepend_ignored_keys(
-                self._paginated_jmd(
-                    rows, label, total, page, page_size
+            t0 = time.perf_counter()
+            rows = self._fetchall(exec_sql, params)
+            if dbg.active:
+                dbg.timing_ms = (
+                    (time.perf_counter() - t0) * 1000
+                )
+                dbg.sql = exec_sql
+                if dbg.wants("plan"):
+                    dbg.plan = self._explain(
+                        exec_sql, params
+                    )
+            return _prepend_debug(
+                _prepend_ignored_keys(
+                    self._paginated_jmd(
+                        rows, label, total, page, page_size
+                    ),
+                    ignored,
                 ),
-                ignored,
+                dbg,
             )
 
+        t0 = time.perf_counter()
         rows = self._fetchall(base_sql, params)
+        if dbg.active:
+            dbg.timing_ms = (
+                (time.perf_counter() - t0) * 1000
+            )
+            dbg.sql = base_sql
+            if dbg.wants("plan"):
+                dbg.plan = self._explain(base_sql, params)
         if not rows:
             return serialize(
                 {"status": 404, "code": "not_found",
-                 "message": f"No records found in {table.name}"},
+                 "message": (
+                     f"No records found in {table.name}"
+                 )},
                 label="Error",
             )
-        # Return a single record document when there is exactly one match.
         if len(rows) == 1:
-            return _prepend_ignored_keys(
-                _row_to_jmd(rows[0], label), ignored
+            return _prepend_debug(
+                _prepend_ignored_keys(
+                    _row_to_jmd(rows[0], label), ignored
+                ),
+                dbg,
             )
-        return _prepend_ignored_keys(
-            _rows_to_jmd(rows, label), ignored
+        return _prepend_debug(
+            _prepend_ignored_keys(
+                _rows_to_jmd(rows, label), ignored
+            ),
+            dbg,
         )
 
     def _query(self, jmd_source: str) -> str:
@@ -604,44 +762,63 @@ class SQLTranslator:
         query_parser = JMDQueryParser()
         doc = query_parser.parse(jmd_source)
         fm = query_parser.frontmatter
+        dbg = _parse_debug(fm)
         ignored = _check_frontmatter(
             fm, _KNOWN_FM_READ_QUERY, "observable"
         )
         table = self._resolve_or_error(doc.label)
+        if dbg.wants("table"):
+            dbg.table = table.name
 
         # Translate each QueryField into a SQL WHERE fragment.
         table_cols = {c.name for c in table.columns}
-        where, params = self._build_where_from_fields(doc.fields, table_cols)
+        where, params = self._build_where_from_fields(
+            doc.fields, table_cols
+        )
 
-        # JOIN mode: delegate to _query_with_joins before any other logic.
+        # JOIN mode.
         if "join" in fm:
             join_specs = _parse_join_specs(str(fm["join"]))
-            return _prepend_ignored_keys(
-                self._query_with_joins(
-                    table, doc.label, doc.fields, fm, join_specs
+            return _prepend_debug(
+                _prepend_ignored_keys(
+                    self._query_with_joins(
+                        table, doc.label, doc.fields,
+                        fm, join_specs,
+                    ),
+                    ignored,
                 ),
-                ignored,
+                dbg,
             )
 
-        # Aggregation mode: any of group/sum/avg/min/max present.
-        if "group" in fm or any(k in fm for k in _AGG_FUNCS):
-            return _prepend_ignored_keys(
-                self._aggregate(
-                    table, doc.label, where, params, fm
+        # Aggregation mode.
+        if "group" in fm or any(
+            k in fm for k in _AGG_FUNCS
+        ):
+            return _prepend_debug(
+                _prepend_ignored_keys(
+                    self._aggregate(
+                        table, doc.label, where, params, fm
+                    ),
+                    ignored,
                 ),
-                ignored,
+                dbg,
             )
 
         # Apply select: column projection if requested.
         select_clause = "*"
         if "select" in fm:
-            sel_cols = _parse_select_cols(str(fm["select"]))
+            sel_cols = _parse_select_cols(
+                str(fm["select"])
+            )
             if sel_cols:
                 for col in sel_cols:
                     if col not in table_cols:
-                        available = ", ".join(sorted(table_cols))
+                        available = ", ".join(
+                            sorted(table_cols)
+                        )
                         raise ValueError(
-                            f"Unknown column '{col}' in 'select'. "
+                            f"Unknown column '{col}'"
+                            " in 'select'. "
                             f"Available: {available}"
                         )
                 select_clause = ", ".join(
@@ -653,22 +830,33 @@ class SQLTranslator:
             f' FROM {_quote_identifier(table.name)}'
         )
         count_sql = (
-            f'SELECT COUNT(*) FROM {_quote_identifier(table.name)}'
+            f'SELECT COUNT(*)'
+            f' FROM {_quote_identifier(table.name)}'
         )
         if where:
             base_sql += f" WHERE {where}"
             count_sql += f" WHERE {where}"
 
-        # count (bare key without group) — return only the count, no rows.
+        # count (bare key without group).
         if "count" in fm:
-            total = self._conn.execute(count_sql, params).fetchone()[0]
+            t0 = time.perf_counter()
+            total = self._conn.execute(
+                count_sql, params
+            ).fetchone()[0]
+            if dbg.active:
+                dbg.timing_ms = (
+                    (time.perf_counter() - t0) * 1000
+                )
+                dbg.sql = count_sql
             resp = (
                 f"count: {total}\n\n"
                 + serialize({}, label=doc.label)
             )
-            return _prepend_ignored_keys(resp, ignored)
+            return _prepend_debug(
+                _prepend_ignored_keys(resp, ignored), dbg
+            )
 
-        # sort: ORDER BY (comma-separated "<col> [asc|desc]" pairs).
+        # sort: ORDER BY.
         if "sort" in fm:
             order_parts: list[str] = []
             for item in str(fm["sort"]).split(","):
@@ -677,41 +865,77 @@ class SQLTranslator:
                     continue
                 col = parts[0]
                 if col not in table_cols:
-                    available = ", ".join(sorted(table_cols))
+                    available = ", ".join(
+                        sorted(table_cols)
+                    )
                     raise ValueError(
-                        f"Unknown column '{col}' in 'sort'. "
+                        f"Unknown column '{col}'"
+                        " in 'sort'. "
                         f"Available: {available}"
                     )
                 direction = (
                     parts[1].upper()
-                    if len(parts) > 1 and parts[1].upper() in ("ASC", "DESC")
+                    if len(parts) > 1
+                    and parts[1].upper() in ("ASC", "DESC")
                     else "ASC"
                 )
                 order_parts.append(
                     f"{_quote_identifier(col)} {direction}"
                 )
             if order_parts:
-                base_sql += " ORDER BY " + ", ".join(order_parts)
+                base_sql += (
+                    " ORDER BY " + ", ".join(order_parts)
+                )
 
-        page_size = int(fm["page-size"]) if "page-size" in fm else 0
+        page_size = (
+            int(fm["page-size"]) if "page-size" in fm else 0
+        )
         if page_size > 0:
             page = max(1, int(fm.get("page", 1)))
-            total = self._conn.execute(count_sql, params).fetchone()[0]
+            total = self._conn.execute(
+                count_sql, params
+            ).fetchone()[0]
             offset = (page - 1) * page_size
-            rows = self._fetchall(
-                base_sql + f" LIMIT {page_size} OFFSET {offset}",
-                params,
+            exec_sql = (
+                base_sql
+                + f" LIMIT {page_size} OFFSET {offset}"
             )
-            return _prepend_ignored_keys(
-                self._paginated_jmd(
-                    rows, doc.label, total, page, page_size
+            t0 = time.perf_counter()
+            rows = self._fetchall(exec_sql, params)
+            if dbg.active:
+                dbg.timing_ms = (
+                    (time.perf_counter() - t0) * 1000
+                )
+                dbg.sql = exec_sql
+                if dbg.wants("plan"):
+                    dbg.plan = self._explain(
+                        exec_sql, params
+                    )
+            return _prepend_debug(
+                _prepend_ignored_keys(
+                    self._paginated_jmd(
+                        rows, doc.label,
+                        total, page, page_size,
+                    ),
+                    ignored,
                 ),
-                ignored,
+                dbg,
             )
 
+        t0 = time.perf_counter()
         rows = self._fetchall(base_sql, params)
-        return _prepend_ignored_keys(
-            _rows_to_jmd(rows, doc.label), ignored
+        if dbg.active:
+            dbg.timing_ms = (
+                (time.perf_counter() - t0) * 1000
+            )
+            dbg.sql = base_sql
+            if dbg.wants("plan"):
+                dbg.plan = self._explain(base_sql, params)
+        return _prepend_debug(
+            _prepend_ignored_keys(
+                _rows_to_jmd(rows, doc.label), ignored
+            ),
+            dbg,
         )
 
     # ------------------------------------------------------------------
@@ -736,8 +960,10 @@ class SQLTranslator:
 
         parser = JMDParser()
         data = parser.parse(jmd_source)
+        fm = parser.frontmatter
+        dbg = _parse_debug(fm)
         ignored = _check_frontmatter(
-            parser.frontmatter, _KNOWN_FM_WRITE, "observable"
+            fm, _KNOWN_FM_WRITE, "observable"
         )
         label = self._label_from_source(jmd_source)
 
@@ -746,11 +972,17 @@ class SQLTranslator:
             if label.endswith("[]"):
                 label = label[:-2]
             table = self._resolve_or_error(label)
-            return _prepend_ignored_keys(
-                self._bulk_insert(data, table, label), ignored
+            return _prepend_debug(
+                _prepend_ignored_keys(
+                    self._bulk_insert(data, table, label),
+                    ignored,
+                ),
+                dbg,
             )
 
         table = self._resolve_or_error(label)
+        if dbg.wants("table"):
+            dbg.table = table.name
 
         # Prevent writes to views — they are read-only from our perspective.
         if table.is_view:
@@ -783,22 +1015,34 @@ class SQLTranslator:
         # statement.  SQLite replaces a row when a UNIQUE or PRIMARY KEY
         # constraint would otherwise be violated.
         sql = (
-            f'INSERT OR REPLACE INTO {_quote_identifier(table.name)}'
+            f"INSERT OR REPLACE INTO"
+            f" {_quote_identifier(table.name)}"
             f" ({col_names}) VALUES ({placeholders})"
         )
+        if dbg.wants("sql"):
+            dbg.sql = sql
+        t0 = time.perf_counter()
         cur = self._conn.execute(sql, values)
         self._conn.commit()
+        if dbg.active:
+            dbg.timing_ms = (
+                (time.perf_counter() - t0) * 1000
+            )
 
-        # Re-read the written row by rowid so we return the definitive
-        # state (including any DEFAULT values or computed columns).
+        # Re-read the written row by rowid so we return the
+        # definitive state (including DEFAULT values).
         rowid = cur.lastrowid
+        qt = _quote_identifier(table.name)
         row = self._conn.execute(
-            f'SELECT * FROM {_quote_identifier(table.name)} WHERE rowid = ?',
+            f"SELECT * FROM {qt} WHERE rowid = ?",
             (rowid,),
         ).fetchone()
         result = dict(row) if row else data
-        return _prepend_ignored_keys(
-            _row_to_jmd(result, label), ignored
+        return _prepend_debug(
+            _prepend_ignored_keys(
+                _row_to_jmd(result, label), ignored
+            ),
+            dbg,
         )
 
     # ------------------------------------------------------------------
@@ -821,14 +1065,14 @@ class SQLTranslator:
         if jmd_mode(jmd_source) == "schema":
             return self._delete_schema(jmd_source)
 
-        # Extract frontmatter for strict-refusal check.
+        # Extract frontmatter for strict-refusal check and debug.
         # JMDDeleteParser does not expose .frontmatter, so we
         # parse once with JMDParser just for the frontmatter.
         fm_parser = JMDParser()
         fm_parser.parse(jmd_source)
-        _check_frontmatter(
-            fm_parser.frontmatter, _KNOWN_FM_DELETE, "strict"
-        )
+        fm = fm_parser.frontmatter
+        dbg = _parse_debug(fm)
+        _check_frontmatter(fm, _KNOWN_FM_DELETE, "strict")
 
         doc = JMDDeleteParser().parse(jmd_source)
 
@@ -883,10 +1127,16 @@ class SQLTranslator:
                 label="Error",
             )
 
-        # Read the row before deletion so we can return it as the response.
+        qt = _quote_identifier(table.name)
+        del_sql = f"DELETE FROM {qt} WHERE {where}"
+        if dbg.wants("sql"):
+            dbg.sql = del_sql
+        if dbg.wants("table"):
+            dbg.table = table.name
+
+        # Read the row before deletion so we can return it.
         row = self._conn.execute(
-            f'SELECT * FROM {_quote_identifier(table.name)} WHERE {where}',
-            params,
+            f"SELECT * FROM {qt} WHERE {where}", params
         ).fetchone()
         if row is None:
             return serialize(
@@ -897,12 +1147,16 @@ class SQLTranslator:
                 label="Error",
             )
 
-        self._conn.execute(
-            f'DELETE FROM {_quote_identifier(table.name)} WHERE {where}',
-            params,
-        )
+        t0 = time.perf_counter()
+        self._conn.execute(del_sql, params)
         self._conn.commit()
-        return _row_to_jmd(dict(row), doc.label)
+        if dbg.active:
+            dbg.timing_ms = (
+                (time.perf_counter() - t0) * 1000
+            )
+        return _prepend_debug(
+            _row_to_jmd(dict(row), doc.label), dbg
+        )
 
     def _bulk_insert(
         self,
@@ -1193,6 +1447,49 @@ class SQLTranslator:
         lines.append("write: observable-tolerance")
         lines.append(
             "delete: strict-refusal (unknown keys cause an error)"
+        )
+
+        # -- Debug mode --------------------------------------------
+        lines.append("")
+        lines.append("## debug")
+        lines.append(
+            "Use debug: in frontmatter to inspect internals."
+            " Comma-separated, composable."
+        )
+        lines.append("")
+        lines.append("### values")
+        for val, desc in (
+            ("sql", "generated SQL statement"),
+            ("timing", "execution time in ms"),
+            ("table", "resolved table name"),
+            ("filters", "field-to-SQL filter mapping"),
+            ("plan", "EXPLAIN QUERY PLAN output"),
+            ("resolved", "frontmatter key-to-SQL mapping"),
+            ("coercions", "type coercion details"),
+        ):
+            lines.append(f"{val}: {desc}")
+        lines.append("")
+        lines.append("### example")
+        lines.append("debug: sql, timing")
+        lines.append("")
+        lines.append("#? Orders")
+        lines.append("ShipCountry: Germany")
+        lines.append("")
+        lines.append("### response-keys")
+        lines.append(
+            "debug-sql: the SQL that was executed"
+        )
+        lines.append(
+            "debug-timing: execution time (e.g. 1.2ms)"
+        )
+        lines.append(
+            "debug-unknown: unrecognized debug values"
+        )
+        lines.append("")
+        lines.append("### warning")
+        lines.append(
+            "debug on delete shows SQL but STILL EXECUTES."
+            " It is NOT a dry-run."
         )
 
         # -- Notes -------------------------------------------------
@@ -2061,6 +2358,13 @@ class SQLTranslator:
         """Execute a SELECT and return all rows as plain dicts."""
         cur = self._conn.execute(sql, params)
         return [dict(row) for row in cur.fetchall()]
+
+    def _explain(self, sql: str, params: list[Any]) -> str:
+        """Return EXPLAIN QUERY PLAN output as a single string."""
+        rows = self._conn.execute(
+            f"EXPLAIN QUERY PLAN {sql}", params
+        ).fetchall()
+        return "; ".join(str(row[3]) for row in rows)
 
     def _label_from_source(self, source: str) -> str:
         """Extract the table label from the first heading line of a JMD doc.

@@ -1044,3 +1044,118 @@ class TestFrontmatterTolerance:
         )
         # Should reach the normal "not found" path, not error.
         assert "# Error" in result or "# Orders" in result
+
+
+# -----------------------------------------------------------
+# 19. TestDebugMode
+# -----------------------------------------------------------
+
+
+class TestDebugMode:
+    """Tests for the debug: frontmatter feature."""
+
+    def test_debug_sql_on_read(
+        self, nw: SQLTranslator
+    ) -> None:
+        """debug: sql returns the generated SQL."""
+        result = nw.read(
+            "debug: sql\n\n#? Shippers"
+        )
+        assert "debug-sql:" in result
+        assert "SELECT" in result
+
+    def test_debug_timing_on_read(
+        self, nw: SQLTranslator
+    ) -> None:
+        """debug: timing returns execution time."""
+        result = nw.read(
+            "debug: timing\n\n#? Shippers"
+        )
+        assert "debug-timing:" in result
+        assert "ms" in result
+
+    def test_debug_table_on_read(
+        self, nw: SQLTranslator
+    ) -> None:
+        """debug: table returns the resolved table name."""
+        result = nw.read(
+            "debug: table\n\n#? Shippers"
+        )
+        assert "debug-table: Shippers" in result
+
+    def test_debug_plan_on_read(
+        self, nw: SQLTranslator
+    ) -> None:
+        """debug: plan returns EXPLAIN QUERY PLAN output."""
+        result = nw.read(
+            "debug: plan\n\n#? Shippers"
+        )
+        assert "debug-plan:" in result
+        assert "SCAN" in result or "SEARCH" in result
+
+    def test_debug_composable(
+        self, nw: SQLTranslator
+    ) -> None:
+        """Multiple debug values work together."""
+        result = nw.read(
+            "debug: sql, timing, table\n\n#? Shippers"
+        )
+        assert "debug-sql:" in result
+        assert "debug-timing:" in result
+        assert "debug-table:" in result
+
+    def test_debug_unknown_value_noted(
+        self, nw: SQLTranslator
+    ) -> None:
+        """Unknown debug values are noted in response."""
+        result = nw.read(
+            "debug: sql, foobar\n\n#? Shippers"
+        )
+        assert "debug-sql:" in result
+        assert "debug-unknown: foobar" in result
+
+    def test_debug_sql_on_write(
+        self, nw_rw: SQLTranslator
+    ) -> None:
+        """debug: sql on write shows the INSERT SQL."""
+        result = nw_rw.write(
+            "debug: sql\n\n# Orders\n"
+            "OrderID: 99999\nShipCountry: Debug"
+        )
+        assert "debug-sql:" in result
+        assert "INSERT" in result
+
+    def test_debug_sql_on_delete(
+        self, nw_rw: SQLTranslator
+    ) -> None:
+        """debug: sql on delete shows SQL but executes."""
+        nw_rw.write(
+            "# Orders\nOrderID: 99998\nShipCountry: Del"
+        )
+        result = nw_rw.delete(
+            "debug: sql\n\n#- Orders\nOrderID: 99998"
+        )
+        assert "debug-sql:" in result
+        assert "DELETE" in result
+        # Verify it actually deleted.
+        check = nw_rw.read("# Orders\nOrderID: 99998")
+        assert "not_found" in check
+
+    def test_debug_on_data_read(
+        self, nw: SQLTranslator
+    ) -> None:
+        """debug works on data-mode read (# Label)."""
+        result = nw.read(
+            "debug: sql, table\n\n# Shippers\nShipperID: 1"
+        )
+        assert "debug-sql:" in result
+        assert "debug-table:" in result
+
+    def test_debug_in_root_schema(
+        self, nw: SQLTranslator
+    ) -> None:
+        """Root schema documents the debug feature."""
+        result = nw.read("#! Database")
+        assert "## debug" in result
+        assert "sql:" in result
+        assert "NOT a dry-run" in result
