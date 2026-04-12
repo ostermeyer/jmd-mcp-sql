@@ -740,6 +740,16 @@ class SQLTranslator:
             parser.frontmatter, _KNOWN_FM_WRITE, "observable"
         )
         label = self._label_from_source(jmd_source)
+
+        # Bulk-insert: # Table[] with a list of records.
+        if isinstance(data, list):
+            if label.endswith("[]"):
+                label = label[:-2]
+            table = self._resolve_or_error(label)
+            return _prepend_ignored_keys(
+                self._bulk_insert(data, table, label), ignored
+            )
+
         table = self._resolve_or_error(label)
 
         # Prevent writes to views — they are read-only from our perspective.
@@ -747,7 +757,8 @@ class SQLTranslator:
             return serialize(
                 {"status": 400, "code": "read_only",
                  "message": (
-                     f"'{table.name}' is a view and cannot be written to"
+                     f"'{table.name}' is a view and cannot"
+                     " be written to"
                  )},
                 label="Error",
             )
@@ -892,6 +903,91 @@ class SQLTranslator:
         )
         self._conn.commit()
         return _row_to_jmd(dict(row), doc.label)
+
+    def _bulk_insert(
+        self,
+        records: list[Any],
+        table: Any,
+        label: str,
+    ) -> str:
+        """Insert multiple records from a ``# Table[]`` document.
+
+        Args:
+            records: List of dicts, each representing one record.
+            table: Resolved :class:`TableInfo`.
+            label: Table label for the response document.
+
+        Returns:
+            Inserted records as a JMD array document, or a
+            ``# Error`` document on failure.
+        """
+        if not records:
+            return serialize(
+                {"status": 400, "code": "bad_request",
+                 "message": "Bulk insert list is empty"},
+                label="Error",
+            )
+
+        if table.is_view:
+            return serialize(
+                {"status": 400, "code": "read_only",
+                 "message": (
+                     f"'{table.name}' is a view and cannot"
+                     " be written to"
+                 )},
+                label="Error",
+            )
+
+        table_cols = {c.name for c in table.columns}
+        qt = _quote_identifier(table.name)
+        inserted: list[dict[str, Any]] = []
+
+        for i, record in enumerate(records):
+            if not isinstance(record, dict) or not record:
+                return serialize(
+                    {"status": 400, "code": "bad_request",
+                     "message": (
+                         f"Item {i} is not a valid record"
+                     )},
+                    label="Error",
+                )
+            unknown = [
+                k for k in record if k not in table_cols
+            ]
+            if unknown:
+                return serialize(
+                    {"status": 400, "code": "bad_request",
+                     "message": (
+                         f"Unknown column(s) {unknown!r}"
+                         f" in table '{table.name}'"
+                         f" (item {i})"
+                     )},
+                    label="Error",
+                )
+
+            cols = list(record.keys())
+            placeholders = ", ".join("?" for _ in cols)
+            col_names = ", ".join(
+                _quote_identifier(c) for c in cols
+            )
+            values = [record[c] for c in cols]
+
+            sql = (
+                f"INSERT OR REPLACE INTO {qt}"
+                f" ({col_names}) VALUES ({placeholders})"
+            )
+            cur = self._conn.execute(sql, values)
+            rowid = cur.lastrowid
+            row = self._conn.execute(
+                f"SELECT * FROM {qt} WHERE rowid = ?",
+                (rowid,),
+            ).fetchone()
+            inserted.append(
+                dict(row) if row else record
+            )
+
+        self._conn.commit()
+        return _rows_to_jmd(inserted, label)
 
     def _bulk_delete(
         self,
@@ -1184,11 +1280,18 @@ class SQLTranslator:
                         )
                         added.append(f.key)
             self._schema = SchemaInspector(self._conn)
-            return serialize(
-                {"table": table_name, "altered": bool(added),
-                 "added": added},
-                label="Result",
-            )
+            skipped = [
+                f.key for f in scalar_fields
+                if f.key in existing_cols
+            ]
+            result: dict[str, Any] = {
+                "table": table_name,
+                "altered": bool(added),
+                "added": added,
+            }
+            if skipped:
+                result["skipped"] = skipped
+            return serialize(result, label="Result")
 
     def _delete_schema(self, jmd_source: str) -> str:
         """Drop a table or view from the database.

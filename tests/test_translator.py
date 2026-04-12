@@ -840,6 +840,101 @@ class TestRootSchema:
 # -----------------------------------------------------------
 
 
+# -----------------------------------------------------------
+# 16. TestBulkInsert — # Table[]
+# -----------------------------------------------------------
+
+
+class TestBulkInsert:
+    """Tests for bulk-insert documents (# Table[])."""
+
+    def test_bulk_insert_multiple_records(
+        self, nw_rw: SQLTranslator
+    ) -> None:
+        """Bulk-insert creates multiple records."""
+        result = nw_rw.write(
+            "# Orders[]\n"
+            "- OrderID: 88881\n"
+            "  ShipCountry: BulkA\n"
+            "- OrderID: 88882\n"
+            "  ShipCountry: BulkB\n"
+            "- OrderID: 88883\n"
+            "  ShipCountry: BulkC"
+        )
+        assert "88881" in result
+        assert "88882" in result
+        assert "88883" in result
+
+    def test_bulk_insert_returns_array(
+        self, nw_rw: SQLTranslator
+    ) -> None:
+        """Bulk-insert returns a JMD array document."""
+        result = nw_rw.write(
+            "# Orders[]\n"
+            "- OrderID: 88884\n"
+            "  ShipCountry: BulkD\n"
+            "- OrderID: 88885\n"
+            "  ShipCountry: BulkE"
+        )
+        assert "# Orders[]" in result
+
+    def test_bulk_insert_empty_list_rejected(
+        self, nw_rw: SQLTranslator
+    ) -> None:
+        """Bulk-insert with empty list returns error."""
+        result = nw_rw.write("# Orders[]")
+        assert "# Error" in result
+
+    def test_bulk_insert_unknown_column_rejected(
+        self, nw_rw: SQLTranslator
+    ) -> None:
+        """Bulk-insert with unknown column returns error."""
+        result = nw_rw.write(
+            "# Orders[]\n"
+            "- OrderID: 88886\n"
+            "  Bogus: oops"
+        )
+        assert "# Error" in result
+        assert "Bogus" in result
+
+
+# -----------------------------------------------------------
+# 17. TestSchemaAlterSkipped — skipped[] block
+# -----------------------------------------------------------
+
+
+class TestSchemaAlterSkipped:
+    """Tests for skipped[] in schema-alter responses."""
+
+    def test_alter_no_change_shows_skipped(
+        self, empty: SQLTranslator
+    ) -> None:
+        """Re-submitting same schema shows skipped columns."""
+        empty.write(
+            "#! Items\nid: integer readonly\nname: string"
+        )
+        result = empty.write(
+            "#! Items\nid: integer readonly\nname: string"
+        )
+        assert "altered: false" in result
+        assert "skipped" in result
+        assert "id" in result
+        assert "name" in result
+
+    def test_alter_with_new_col_no_skipped(
+        self, empty: SQLTranslator
+    ) -> None:
+        """Adding a new column does not show it in skipped."""
+        empty.write(
+            "#! Items\nid: integer readonly\nname: string"
+        )
+        result = empty.write(
+            "#! Items\ncolor: string"
+        )
+        assert "altered: true" in result
+        assert "color" in result
+
+
 class TestBulkDelete:
     """Tests for bulk-delete documents (#- Table[])."""
 

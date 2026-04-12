@@ -270,6 +270,14 @@ def write(document: str) -> str:
         status: shipped
         total: 149.99
 
+    Bulk insert (# Label[]): insert multiple records at once.
+
+        # Order[]
+        - id: 42
+          status: shipped
+        - id: 43
+          status: pending
+
     Schema document (#! Label): create or extend a table.
     If the table does not exist, it is created. If it exists, new
     columns are added. Existing columns are never modified or removed.
