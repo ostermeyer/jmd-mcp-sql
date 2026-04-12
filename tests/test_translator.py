@@ -1151,6 +1151,59 @@ class TestDebugMode:
         assert "debug-sql:" in result
         assert "debug-table:" in result
 
+    def test_debug_filters(
+        self, nw: SQLTranslator
+    ) -> None:
+        """debug: filters shows field-to-SQL mapping."""
+        result = nw.read(
+            "debug: filters\n\n"
+            "#? Orders\nShipCountry: Germany"
+        )
+        assert "debug-filter-ShipCountry:" in result
+
+    def test_debug_filters_substring(
+        self, nw: SQLTranslator
+    ) -> None:
+        """debug: filters shows LIKE for ~ operator."""
+        result = nw.read(
+            "debug: filters\n\n"
+            "#? Customers\nCompanyName: ~market"
+        )
+        assert "debug-filter-CompanyName:" in result
+        assert "LIKE" in result
+
+    def test_debug_resolved_sort(
+        self, nw: SQLTranslator
+    ) -> None:
+        """debug: resolved shows ORDER BY for sort."""
+        result = nw.read(
+            "debug: resolved\nsort: Freight desc\n\n"
+            "#? Orders"
+        )
+        assert "debug-resolved-sort:" in result
+        assert "ORDER BY" in result
+
+    def test_debug_resolved_pagination(
+        self, nw: SQLTranslator
+    ) -> None:
+        """debug: resolved shows LIMIT/OFFSET for pagination."""
+        result = nw.read(
+            "debug: resolved\npage-size: 10\npage: 2\n\n"
+            "#? Orders"
+        )
+        assert "debug-resolved-page-size: LIMIT 10" in result
+        assert "debug-resolved-page: OFFSET 10" in result
+
+    def test_debug_coercions(
+        self, nw: SQLTranslator
+    ) -> None:
+        """debug: coercions shows type info for filters."""
+        result = nw.read(
+            "debug: coercions\n\n"
+            "#? Orders\nShipCountry: ~Germ"
+        )
+        assert "debug-coercion-ShipCountry:" in result
+
     def test_debug_in_root_schema(
         self, nw: SQLTranslator
     ) -> None:

@@ -773,7 +773,7 @@ class SQLTranslator:
         # Translate each QueryField into a SQL WHERE fragment.
         table_cols = {c.name for c in table.columns}
         where, params = self._build_where_from_fields(
-            doc.fields, table_cols
+            doc.fields, table_cols, dbg=dbg
         )
 
         # JOIN mode.
@@ -837,6 +837,17 @@ class SQLTranslator:
             base_sql += f" WHERE {where}"
             count_sql += f" WHERE {where}"
 
+        # Collect resolved frontmatter→SQL mappings.
+        if dbg.wants("resolved"):
+            if "select" in fm:
+                dbg.resolved.append(
+                    ("select", select_clause)
+                )
+            if where:
+                dbg.resolved.append(
+                    ("where", f"WHERE {where}")
+                )
+
         # count (bare key without group).
         if "count" in fm:
             t0 = time.perf_counter()
@@ -883,23 +894,36 @@ class SQLTranslator:
                     f"{_quote_identifier(col)} {direction}"
                 )
             if order_parts:
-                base_sql += (
-                    " ORDER BY " + ", ".join(order_parts)
-                )
+                order_sql = ", ".join(order_parts)
+                base_sql += " ORDER BY " + order_sql
+                if dbg.wants("resolved"):
+                    dbg.resolved.append(
+                        ("sort", f"ORDER BY {order_sql}")
+                    )
 
         page_size = (
             int(fm["page-size"]) if "page-size" in fm else 0
         )
         if page_size > 0:
-            page = max(1, int(fm.get("page", 1)))
+            pg = max(1, int(fm.get("page", 1)))
             total = self._conn.execute(
                 count_sql, params
             ).fetchone()[0]
-            offset = (page - 1) * page_size
+            pg_offset = (pg - 1) * page_size
             exec_sql = (
                 base_sql
-                + f" LIMIT {page_size} OFFSET {offset}"
+                + f" LIMIT {page_size}"
+                + f" OFFSET {pg_offset}"
             )
+            if dbg.wants("resolved"):
+                dbg.resolved.append(
+                    ("page-size",
+                     f"LIMIT {page_size}")
+                )
+                dbg.resolved.append(
+                    ("page",
+                     f"OFFSET {pg_offset}")
+                )
             t0 = time.perf_counter()
             rows = self._fetchall(exec_sql, params)
             if dbg.active:
@@ -915,7 +939,7 @@ class SQLTranslator:
                 _prepend_ignored_keys(
                     self._paginated_jmd(
                         rows, doc.label,
-                        total, page, page_size,
+                        total, pg, page_size,
                     ),
                     ignored,
                 ),
@@ -2247,23 +2271,16 @@ class SQLTranslator:
         fields: list[Any],
         table_cols: set[str],
         col_namespace: dict[str, str | None] | None = None,
+        dbg: DebugInfo | None = None,
     ) -> tuple[str, list[Any]]:
-        """Build a WHERE clause from a list of QueryField nodes (query mode).
-
-        JMDQueryParser returns a heterogeneous list of QueryField,
-        QueryObject, and QueryArray nodes.  Only QueryField nodes with a
-        filter condition map directly to SQL predicates; the others
-        represent projection or nested structure which flat SQL cannot
-        express and are silently skipped.
+        """Build a WHERE clause from a list of QueryField nodes.
 
         Args:
             fields: Parsed query fields from JMDQueryParser.
-            table_cols: Valid column names for the target table.  Filter
-                fields referencing unknown columns raise ValueError.
-            col_namespace: Optional qualified-reference mapping for JOIN
-                queries.  When provided, each column is validated for
-                non-ambiguity and the qualified reference is passed to
-                :meth:`_condition_to_sql` via the *qcol* parameter.
+            table_cols: Valid column names for the target table.
+            col_namespace: Optional qualified-reference mapping
+                for JOIN queries.
+            dbg: Optional debug collector for filter mapping.
 
         Returns:
             Tuple of ``(where_clause, params)``.
@@ -2275,28 +2292,44 @@ class SQLTranslator:
         params: list[Any] = []
         for f in fields:
             if not isinstance(f, QueryField):
-                continue  # QueryObject/QueryArray: no SQL equivalent
+                continue
             if f.condition.op in ("?", "?:"):
-                continue  # Projection marker — selects columns, not rows
+                continue
             if f.key not in table_cols:
                 available = ", ".join(sorted(table_cols))
                 raise ValueError(
-                    f"Unknown column '{f.key}' in query filter. "
-                    f"Available: {available}"
+                    f"Unknown column '{f.key}' in query"
+                    f" filter. Available: {available}"
                 )
             qcol: str | None = None
             if col_namespace is not None:
                 if col_namespace.get(f.key) is None:
                     raise ValueError(
-                        f"Ambiguous column '{f.key}' in query filter. "
-                        f"Exists in multiple joined tables."
+                        f"Ambiguous column '{f.key}'"
+                        " in query filter. Exists in"
+                        " multiple joined tables."
                     )
                 qcol = col_namespace[f.key]
-            clause, p = self._condition_to_sql(f.key, f.condition, qcol)
+            clause, p = self._condition_to_sql(
+                f.key, f.condition, qcol
+            )
             if clause:
                 clauses.append(clause)
                 params.extend(p)
-        return (" AND ".join(clauses), params) if clauses else ("", [])
+                if dbg is not None and dbg.wants("filters"):
+                    dbg.filters.append((f.key, clause))
+                if (
+                    dbg is not None
+                    and dbg.wants("coercions")
+                ):
+                    self._collect_coercion(
+                        dbg, f.key, f.condition
+                    )
+        return (
+            (" AND ".join(clauses), params)
+            if clauses
+            else ("", [])
+        )
 
     def _condition_to_sql(
         self,
@@ -2365,6 +2398,42 @@ class SQLTranslator:
             f"EXPLAIN QUERY PLAN {sql}", params
         ).fetchall()
         return "; ".join(str(row[3]) for row in rows)
+
+    def _collect_coercion(
+        self,
+        dbg: DebugInfo,
+        col: str,
+        cond: Condition,
+    ) -> None:
+        """Record type coercion info for a filter column."""
+        table_info = None
+        for t in self._schema.tables().values():
+            for c in t.columns:
+                if c.name == col:
+                    table_info = c
+                    break
+            if table_info:
+                break
+        if table_info is None:
+            return
+        sqlite_type = (table_info.type or "TEXT").upper()
+        jmd_type = _sqlite_type_to_jmd(table_info.type)
+        op = cond.op
+        if op in (">", ">=", "<", "<=", "="):
+            if sqlite_type in ("TEXT", "VARCHAR"):
+                dbg.coercions.append(
+                    (col, f"string-compare on {jmd_type}")
+                )
+        elif op == "regex":
+            dbg.coercions.append(
+                (col, f"regex on {jmd_type}"
+                 " (implicit full-match anchoring)")
+            )
+        elif op == "~":
+            dbg.coercions.append(
+                (col, f"LIKE on {jmd_type}"
+                 " (case-insensitive substring)")
+            )
 
     def _label_from_source(self, source: str) -> str:
         """Extract the table label from the first heading line of a JMD doc.
