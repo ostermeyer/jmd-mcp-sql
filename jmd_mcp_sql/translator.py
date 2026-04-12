@@ -370,6 +370,65 @@ _JMD_TO_SQLITE: dict[str, str] = {
 }
 
 
+# -- Known frontmatter keys per operation (for WP2 tolerance) ------
+
+_KNOWN_FM_READ_DATA: frozenset[str] = frozenset({
+    "page-size", "page", "count", "select",
+})
+_KNOWN_FM_READ_QUERY: frozenset[str] = frozenset({
+    "select", "join", "sum", "avg", "min", "max", "count",
+    "group", "having", "sort", "page-size", "page",
+})
+_KNOWN_FM_WRITE: frozenset[str] = frozenset()
+_KNOWN_FM_DELETE: frozenset[str] = frozenset({"confirm"})
+
+
+def _check_frontmatter(
+    fm: dict[str, Any],
+    known: frozenset[str],
+    policy: str,
+) -> list[str]:
+    """Validate frontmatter keys against a known set.
+
+    Args:
+        fm: Parsed frontmatter dict from the JMD parser.
+        known: Set of keys this operation recognises.
+        policy: ``"observable"`` to return unknown keys silently,
+            or ``"strict"`` to raise on unknown keys.
+
+    Returns:
+        List of unknown key names (may be empty).
+
+    Raises:
+        ValueError: When *policy* is ``"strict"`` and unknown
+            keys are present.
+    """
+    unknown = [k for k in fm if k not in known]
+    if unknown and policy == "strict":
+        raise ValueError(
+            f"Unknown frontmatter key(s) {unknown!r} on a"
+            " destructive operation. Accepted keys:"
+            f" {sorted(known) or '(none)'}."
+        )
+    return unknown
+
+
+def _prepend_ignored_keys(
+    response: str,
+    ignored: list[str],
+) -> str:
+    """Prepend an ``ignored-keys`` header to *response*.
+
+    Uses the short form from JMD Spec §23.7:
+    ``ignored-keys: key1, key2``.  Returns *response* unchanged
+    when *ignored* is empty.
+    """
+    if not ignored:
+        return response
+    header = "ignored-keys: " + ", ".join(ignored)
+    return f"{header}\n\n{response}"
+
+
 def _row_to_jmd(row: dict[str, Any], label: str) -> str:
     """Serialize a single result row as a JMD data document."""
     return serialize(row, label=label)
@@ -440,6 +499,9 @@ class SQLTranslator:
         parser = JMDParser()
         data = parser.parse(jmd_source)
         fm = parser.frontmatter
+        ignored = _check_frontmatter(
+            fm, _KNOWN_FM_READ_DATA, "observable"
+        )
         label = self._label_from_source(jmd_source)
         table = self._resolve_or_error(label)
 
@@ -486,7 +548,8 @@ class SQLTranslator:
         # count: true — return only the row count, no row data.
         if "count" in fm:
             total = self._conn.execute(count_sql, params).fetchone()[0]
-            return f"count: {total}\n\n" + serialize({}, label=label)
+            resp = f"count: {total}\n\n" + serialize({}, label=label)
+            return _prepend_ignored_keys(resp, ignored)
 
         # Paginated mode: frontmatter contains ``size`` (rows per page)
         # and optionally ``page`` (1-based, defaults to 1).
@@ -496,9 +559,15 @@ class SQLTranslator:
             total = self._conn.execute(count_sql, params).fetchone()[0]
             offset = (page - 1) * page_size
             rows = self._fetchall(
-                base_sql + f" LIMIT {page_size} OFFSET {offset}", params
+                base_sql + f" LIMIT {page_size} OFFSET {offset}",
+                params,
             )
-            return self._paginated_jmd(rows, label, total, page, page_size)
+            return _prepend_ignored_keys(
+                self._paginated_jmd(
+                    rows, label, total, page, page_size
+                ),
+                ignored,
+            )
 
         rows = self._fetchall(base_sql, params)
         if not rows:
@@ -509,8 +578,12 @@ class SQLTranslator:
             )
         # Return a single record document when there is exactly one match.
         if len(rows) == 1:
-            return _row_to_jmd(rows[0], label)
-        return _rows_to_jmd(rows, label)
+            return _prepend_ignored_keys(
+                _row_to_jmd(rows[0], label), ignored
+            )
+        return _prepend_ignored_keys(
+            _rows_to_jmd(rows, label), ignored
+        )
 
     def _query(self, jmd_source: str) -> str:
         """Execute a QBE query document (#?) with optional pagination.
@@ -531,6 +604,9 @@ class SQLTranslator:
         query_parser = JMDQueryParser()
         doc = query_parser.parse(jmd_source)
         fm = query_parser.frontmatter
+        ignored = _check_frontmatter(
+            fm, _KNOWN_FM_READ_QUERY, "observable"
+        )
         table = self._resolve_or_error(doc.label)
 
         # Translate each QueryField into a SQL WHERE fragment.
@@ -540,13 +616,21 @@ class SQLTranslator:
         # JOIN mode: delegate to _query_with_joins before any other logic.
         if "join" in fm:
             join_specs = _parse_join_specs(str(fm["join"]))
-            return self._query_with_joins(
-                table, doc.label, doc.fields, fm, join_specs
+            return _prepend_ignored_keys(
+                self._query_with_joins(
+                    table, doc.label, doc.fields, fm, join_specs
+                ),
+                ignored,
             )
 
         # Aggregation mode: any of group/sum/avg/min/max present.
         if "group" in fm or any(k in fm for k in _AGG_FUNCS):
-            return self._aggregate(table, doc.label, where, params, fm)
+            return _prepend_ignored_keys(
+                self._aggregate(
+                    table, doc.label, where, params, fm
+                ),
+                ignored,
+            )
 
         # Apply select: column projection if requested.
         select_clause = "*"
@@ -578,7 +662,11 @@ class SQLTranslator:
         # count (bare key without group) — return only the count, no rows.
         if "count" in fm:
             total = self._conn.execute(count_sql, params).fetchone()[0]
-            return f"count: {total}\n\n" + serialize({}, label=doc.label)
+            resp = (
+                f"count: {total}\n\n"
+                + serialize({}, label=doc.label)
+            )
+            return _prepend_ignored_keys(resp, ignored)
 
         # sort: ORDER BY (comma-separated "<col> [asc|desc]" pairs).
         if "sort" in fm:
@@ -611,12 +699,20 @@ class SQLTranslator:
             total = self._conn.execute(count_sql, params).fetchone()[0]
             offset = (page - 1) * page_size
             rows = self._fetchall(
-                base_sql + f" LIMIT {page_size} OFFSET {offset}", params
+                base_sql + f" LIMIT {page_size} OFFSET {offset}",
+                params,
             )
-            return self._paginated_jmd(rows, doc.label, total, page, page_size)
+            return _prepend_ignored_keys(
+                self._paginated_jmd(
+                    rows, doc.label, total, page, page_size
+                ),
+                ignored,
+            )
 
         rows = self._fetchall(base_sql, params)
-        return _rows_to_jmd(rows, doc.label)
+        return _prepend_ignored_keys(
+            _rows_to_jmd(rows, doc.label), ignored
+        )
 
     # ------------------------------------------------------------------
     # write — data document (#) → INSERT OR REPLACE
@@ -638,7 +734,11 @@ class SQLTranslator:
         if jmd_mode(jmd_source) == "schema":
             return self._write_schema(jmd_source)
 
-        data = JMDParser().parse(jmd_source)
+        parser = JMDParser()
+        data = parser.parse(jmd_source)
+        ignored = _check_frontmatter(
+            parser.frontmatter, _KNOWN_FM_WRITE, "observable"
+        )
         label = self._label_from_source(jmd_source)
         table = self._resolve_or_error(label)
 
@@ -686,7 +786,9 @@ class SQLTranslator:
             (rowid,),
         ).fetchone()
         result = dict(row) if row else data
-        return _row_to_jmd(result, label)
+        return _prepend_ignored_keys(
+            _row_to_jmd(result, label), ignored
+        )
 
     # ------------------------------------------------------------------
     # delete — delete document (#-) → DELETE WHERE
@@ -708,20 +810,46 @@ class SQLTranslator:
         if jmd_mode(jmd_source) == "schema":
             return self._delete_schema(jmd_source)
 
+        # Extract frontmatter for strict-refusal check.
+        # JMDDeleteParser does not expose .frontmatter, so we
+        # parse once with JMDParser just for the frontmatter.
+        fm_parser = JMDParser()
+        fm_parser.parse(jmd_source)
+        _check_frontmatter(
+            fm_parser.frontmatter, _KNOWN_FM_DELETE, "strict"
+        )
+
         doc = JMDDeleteParser().parse(jmd_source)
+
+        if not doc.label:
+            return serialize(
+                {"status": 400, "code": "bad_request",
+                 "message": (
+                     "Bulk delete requires a table label"
+                     " (use '#- Table[]', not '#- []')"
+                 )},
+                label="Error",
+            )
+
         table = self._resolve_or_error(doc.label)
 
         if table.is_view:
             return serialize(
                 {"status": 400, "code": "read_only",
                  "message": (
-                     f"'{table.name}' is a view and cannot be deleted from"
+                     f"'{table.name}' is a view and cannot"
+                     " be deleted from"
                  )},
                 label="Error",
             )
 
+        if doc.is_bulk:
+            return self._bulk_delete(doc, table)
+
         identifiers = (
-            doc.identifiers if isinstance(doc.identifiers, dict) else {}
+            doc.identifiers
+            if isinstance(doc.identifiers, dict)
+            else {}
         )
         table_cols = {c.name for c in table.columns}
         unknown = [k for k in identifiers if k not in table_cols]
@@ -765,6 +893,86 @@ class SQLTranslator:
         self._conn.commit()
         return _row_to_jmd(dict(row), doc.label)
 
+    def _bulk_delete(
+        self,
+        doc: Any,
+        table: Any,
+    ) -> str:
+        """Delete multiple records by primary-key list.
+
+        Implements ``#- Table[]`` bulk-delete per JMD Spec §15
+        and §22.2.  Scalar list items are treated as primary-key
+        values; object list items provide composite-key fields.
+
+        Args:
+            doc: Parsed :class:`JMDDelete` with ``is_bulk=True``.
+            table: Resolved :class:`TableInfo`.
+
+        Returns:
+            Deleted records as a JMD array document, or a
+            ``# Error`` document on failure.
+        """
+        ids = doc.identifiers
+        if not ids:
+            return serialize(
+                {"status": 400, "code": "bad_request",
+                 "message": "Bulk delete list is empty"},
+                label="Error",
+            )
+
+        pks = table.primary_keys
+        qt = _quote_identifier(table.name)
+
+        # Scalar IDs → single PK column.
+        if not isinstance(ids[0], dict):
+            if len(pks) != 1:
+                return serialize(
+                    {"status": 400, "code": "bad_request",
+                     "message": (
+                         "Scalar bulk-delete requires exactly"
+                         f" one primary key; '{table.name}'"
+                         f" has {len(pks)}: {pks}"
+                     )},
+                    label="Error",
+                )
+            pk = _quote_identifier(pks[0])
+            placeholders = ", ".join("?" for _ in ids)
+            params = list(ids)
+
+            rows = self._fetchall(
+                f"SELECT * FROM {qt}"
+                f" WHERE {pk} IN ({placeholders})",
+                params,
+            )
+            self._conn.execute(
+                f"DELETE FROM {qt}"
+                f" WHERE {pk} IN ({placeholders})",
+                params,
+            )
+            self._conn.commit()
+            return _rows_to_jmd(rows, doc.label)
+
+        # Object IDs → composite or named keys.
+        all_rows: list[dict[str, Any]] = []
+        for obj in ids:
+            if not isinstance(obj, dict) or not obj:
+                continue
+            where, params = self._build_where(obj)
+            if not where:
+                continue
+            row = self._conn.execute(
+                f"SELECT * FROM {qt} WHERE {where}",
+                params,
+            ).fetchone()
+            if row is not None:
+                all_rows.append(dict(row))
+                self._conn.execute(
+                    f"DELETE FROM {qt} WHERE {where}",
+                    params,
+                )
+        self._conn.commit()
+        return _rows_to_jmd(all_rows, doc.label)
+
     # ------------------------------------------------------------------
     # Schema operations (#!)
     # ------------------------------------------------------------------
@@ -775,8 +983,21 @@ class SQLTranslator:
         The output mirrors the input syntax expected by _write_schema,
         so the LLM can read a schema, understand column types and
         constraints, and construct correctly-typed data documents.
+
+        The special label ``Database`` (when no real table of that
+        name exists) returns a root-schema document that describes
+        the server's full capabilities — tables, supported
+        frontmatter keys, QBE operators, and tolerance policies.
         """
         label = self._label_from_source(jmd_source)
+
+        # Root-schema: self-description of the server.
+        if (
+            label.lower() == "database"
+            and self._schema.resolve("Database") is None
+        ):
+            return self._read_root_schema()
+
         table = self._resolve_or_error(label)
         lines = [f"#! {label}"]
         for col in table.columns:
@@ -791,6 +1012,108 @@ class SQLTranslator:
                 modifiers.append("optional")
             suffix = (" " + " ".join(modifiers)) if modifiers else ""
             lines.append(f"{col.name}: {jmd_type}{suffix}")
+        return "\n".join(lines)
+
+    def _read_root_schema(self) -> str:
+        """Build the root-schema document for ``#! Database``.
+
+        The document describes this server's capabilities so that
+        an LLM can discover tables, frontmatter keys, filter
+        operators, and tolerance policies in a single call.
+        """
+        tables = sorted(self._schema.tables().keys())
+
+        lines: list[str] = ["#! Database"]
+
+        # -- Tables ------------------------------------------------
+        lines.append("## tables[]")
+        for t in tables:
+            lines.append(f"- {t}")
+
+        # -- Operations: read --------------------------------------
+        lines.append("")
+        lines.append("## read")
+        lines.append("")
+        lines.append("### frontmatter")
+        for key, desc in (
+            ("select", "column projection (comma-separated)"),
+            ("join", "TableName on JoinCol (comma-sep)"),
+            ("sum", "expression as alias"),
+            ("avg", "expression as alias"),
+            ("min", "expression as alias"),
+            ("max", "expression as alias"),
+            ("count", "(bare key) count rows"),
+            ("group", "col1, col2"),
+            ("having", "post-aggregation filter"),
+            ("sort", "col asc/desc"),
+            ("page-size", "integer (pagination size)"),
+            ("page", "integer (1-based page number)"),
+        ):
+            lines.append(f"{key}: {desc}")
+
+        lines.append("")
+        lines.append("### filter-operators")
+        for op, desc in (
+            ("=", "equality (default when no operator)"),
+            (">", "greater than"),
+            (">=", "greater or equal"),
+            ("<", "less than"),
+            ("<=", "less or equal"),
+            ("|", "alternation (OR)"),
+            ("~", "substring (contains, case-insensitive)"),
+            ("^", "regex (implicit full-match anchoring)"),
+            ("!", "negation (composable with any operator)"),
+        ):
+            lines.append(f"{op}: {desc}")
+
+        # -- Operations: write -------------------------------------
+        lines.append("")
+        lines.append("## write")
+        lines.append("")
+        lines.append("### frontmatter")
+        lines.append("(none currently supported)")
+
+        # -- Operations: delete ------------------------------------
+        lines.append("")
+        lines.append("## delete")
+        lines.append("")
+        lines.append("### frontmatter")
+        lines.append(
+            "confirm: required value 'drop-table' for #! table drops"
+        )
+
+        # -- Frontmatter policy ------------------------------------
+        lines.append("")
+        lines.append("## frontmatter-policy")
+        lines.append("read: observable-tolerance")
+        lines.append("write: observable-tolerance")
+        lines.append(
+            "delete: strict-refusal (unknown keys cause an error)"
+        )
+
+        # -- Notes -------------------------------------------------
+        lines.append("")
+        lines.append("## notes[]")
+        lines.append(
+            "- boolean is stored as integer (0/1)"
+            " due to SQLite limitation"
+        )
+        lines.append(
+            "- column names in filters are case-sensitive"
+        )
+        lines.append(
+            "- frontmatter keys go BEFORE the heading,"
+            " filter fields AFTER"
+        )
+        lines.append(
+            "- unknown frontmatter keys on read/write are"
+            " echoed as ignored-keys in the response"
+        )
+        lines.append(
+            "- unknown frontmatter keys on delete cause a"
+            " structured error (strict refusal)"
+        )
+
         return "\n".join(lines)
 
     def _write_schema(self, jmd_source: str) -> str:
@@ -854,12 +1177,32 @@ class SQLTranslator:
                         added.append(f.key)
             self._schema = SchemaInspector(self._conn)
             return serialize(
-                {"table": table_name, "altered": True, "added": added},
+                {"table": table_name, "altered": bool(added),
+                 "added": added},
                 label="Result",
             )
 
     def _delete_schema(self, jmd_source: str) -> str:
-        """Drop a table or view from the database."""
+        """Drop a table or view from the database.
+
+        Requires ``confirm: drop-table`` in frontmatter as an
+        explicit safety gate against accidental drops.
+        """
+        # Extract frontmatter for the confirm check.
+        fm_parser = JMDParser()
+        fm_parser.parse(jmd_source)
+        fm = fm_parser.frontmatter
+
+        if fm.get("confirm") != "drop-table":
+            return serialize(
+                {"status": 400, "code": "confirmation_required",
+                 "message": (
+                     "Dropping a table requires "
+                     "'confirm: drop-table' in the frontmatter"
+                 )},
+                label="Error",
+            )
+
         label = self._label_from_source(jmd_source)
         table = self._schema.resolve(label)
         if table is None:

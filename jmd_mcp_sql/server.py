@@ -34,197 +34,35 @@ from mcp.server.fastmcp import FastMCP
 from .config import load as load_config
 from .translator import SQLTranslator
 
-_INSTRUCTIONS = """
-This server exposes a SQLite database through four tools —
-open, read, write, delete — using JMD (JSON Markdown) as the data format.
+_INSTRUCTIONS = """\
+This server exposes a SQLite database through four JMD tools:
+open, read, write, delete.
+
+## Getting started
+
+Run read("#! Database") to discover this server's full capabilities:
+available tables, supported frontmatter keys, filter operators,
+and tolerance policies.
 
 ## JMD document syntax
 
-Every document starts with a heading line that sets the document type
-and table name, followed by key: value pairs (one per line):
+Every document has an optional frontmatter block (before the heading)
+and a mandatory heading line:
 
-  # Product          → data document   (exact lookup / insert-or-replace)
-  #? Product         → query document  (filter / list)
-  #! Product         → schema document (describe / create / drop table)
-  #- Product         → delete document (delete matching records)
+  # Product          data document   (lookup / insert)
+  #? Product         query document  (filter / list)
+  #! Product         schema document (describe / create)
+  #- Product         delete document (remove records)
 
-  key: value         → string, integer, or float — inferred automatically
-  key: true/false    → boolean
-
-## Opening a database
-
-Open a SQLite database file at any time:
-
-  open("# Database\npath: /path/to/mydb.db")
-
-If the file does not exist, a new empty database is created.
-The previous database is closed automatically.
-
-Check which database is currently active:
-
-  open("# Database")
-
-## Discovering the database
-
-To see which tables exist, read each table's schema:
-
-  read("#! Customers")
-
-This returns a #! document with column names, JMD types, and modifiers
-(readonly = primary key, optional = nullable).
-
-## Typical workflows
-
-**List all rows (small tables only):**
-  read("#? Orders")
-
-**Filter rows — equality:**
-  read("#? Orders\nstatus: shipped")
-
-**Filter rows — comparison:**
-  read("#? Orders\nFreight: > 50")
-
-**Filter rows — alternation (OR):**
-  read("#? Orders\nShipCountry: Germany|France|UK")
-
-**Filter rows — contains (case-insensitive substring):**
-  read("#? Customers\nCompanyName: ~Corp")
-
-**Filter rows — regex pattern:**
-  read("#? Products\nProductName: ^Chai.*")
-
-**Filter rows — negation (composes with any operator):**
-  read("#? Orders\nShipCountry: !Germany")
-  read("#? Products\nProductName: !^LEGACY.*")
-
-**Look up one record:**
-  read("# Customers\nid: 42")
-
-**Insert or replace a record:**
-  write("# Orders\nid: 1\nstatus: pending\ntotal: 99.90")
-
-**Create a table:**
-  write("#! Products\nid: integer readonly\nname: string\n"
-        "price: float optional")
-
-**Delete a record:**
-  delete("#- Orders\nid: 1")
-
-**Drop a table:**
-  delete("#! OldTable")
-
-## Pagination
-
-IMPORTANT: Always use pagination when querying tables that may contain many
-rows. Without pagination, large result sets will exceed your context window.
-
-Use frontmatter fields before the #? heading to control pagination:
-
-  read("page-size: 50\npage: 1\n\n#? Orders")
-
-The response carries pagination metadata as frontmatter —
-before the root heading:
-
-  total: 830
-  page: 1
-  pages: 17
-  page-size: 50
-
-  # Orders
-  ## data[]
-  - OrderID: 10248
-    ...
-
-Use `total` and `pages` to determine whether to fetch more pages.
-
-**Count only** (no rows returned):
-  read("count: true\n\n#? Orders")
-
-Returns: `count: 830\n\n# Orders`
-
-**Rule of thumb:** Use `page-size: 50` for any table you haven't
-inspected before.
-For tables with fewer than ~20 rows (e.g. Categories, Shippers) pagination is
-optional.
-
-## Field projection
-
-Use `select:` frontmatter to return only specific columns — reduces response
-size and keeps context windows clean.
-
-  select: OrderID, EmployeeID
-
-  #? Orders
-
-Works with `#` (data) and `#?` (query) documents, including aggregation
-(where `select:` filters the result columns after the GROUP BY).
-
-## Joins
-
-Use `join:` frontmatter to query across multiple tables in one call.
-The value is `<TableName> on <JoinColumn>` (INNER JOIN, equi-join).
-
-  join: Order Details on OrderID
-  sum: UnitPrice * Quantity * (1 - Discount) as revenue
-  group: EmployeeID
-  sort: revenue desc
-
-  #? Orders
-
-Multiple joins: comma-separated in a single `join:` value.
-
-  join: Order Details on OrderID, Employees on EmployeeID
-
-**Expression syntax in aggregation with joins:**
-Use `<expression> as <alias>` to compute derived values:
-
-  sum: UnitPrice * Quantity * (1 - Discount) as revenue
-
-The alias becomes the result column name. Without `as`, the default alias
-`<func>_<field>` applies (e.g. `sum_Freight`).
-
-Only column names, numeric literals, and arithmetic operators
-(`+`, `-`, `*`, `/`) are allowed in expressions — no subqueries.
-
-## Aggregation
-
-Aggregation is expressed as frontmatter before the #? heading.
-QBE filter fields narrow rows *before* aggregation (SQL WHERE).
-The `having:` key filters *after* aggregation (SQL HAVING).
-
-| Key               | SQL           | Result column name                  |
-| group: f1, f2     | GROUP BY      | (grouping keys pass through)        |
-| sum: field        | SUM(field)    | sum_field                           |
-| avg: field        | AVG(field)    | avg_field                           |
-| min: field        | MIN(field)    | min_field                           |
-| max: field        | MAX(field)    | max_field                           |
-| count             | COUNT(*)      | count                               |
-
-Multiple fields per function: `sum: Freight, Total`
-→ `sum_Freight`, `sum_Total`.
-
-  sort: sum_revenue desc, EmployeeID asc    → ORDER BY (multiple columns, mixed)
-  having: count > 5                         → HAVING COUNT(*) > 5
-  having: sum_Freight > 1000, count > 2     → HAVING ... AND ... (comma = AND)
-
-`having:` supports: >, >=, <, <=, =
-`sort:` references any result column — grouping keys or aggregate aliases.
-`page-size:` and `page:` apply to the aggregated result set.
-
-**Example — top 3 employees by revenue:**
-  read("group: EmployeeID\nsum: revenue\nsort: sum_revenue desc\n"
-       "page-size: 3\n\n#? OrderDetails")
+Frontmatter keys (e.g. page-size, join, sort) go BEFORE the heading.
+Data/filter fields go AFTER the heading. Mixing them up is the most
+common mistake — a filter field in the frontmatter position is silently
+treated as metadata, not as a filter.
 
 ## Error handling
 
-All tools return a `# Error` document on failure:
-
-  # Error
-  status: 400
-  code: not_found
-  message: No records found in Orders
-
-Check the `code` field to decide how to proceed.
+All tools return a # Error document on failure.
+Check the code field to decide how to proceed.
 """
 
 # Global FastMCP instance.  Tool functions are registered via @mcp.tool()
@@ -329,20 +167,21 @@ def _db_status(*, created: bool = False) -> str:
 
 @mcp.tool(name="open")
 def open_database(document: str) -> str:
-    """Open a SQLite database file or show current database info.
+    """Open a SQLite database or inspect the current one.
 
-    Data document (# Database) with a path field opens the database
-    and makes it the active connection.  If the file does not exist,
-    a new empty database is created.  The previous database is closed
-    automatically.
+    Open (# Database with path):
 
         # Database
         path: /path/to/mydb.db
 
-    Data document (# Database) without fields returns information
-    about the currently active database.
+    If the file does not exist, it is CREATED as an empty
+    database and the response contains ``created: true``.
+
+    Inspect (# Database with no fields):
 
         # Database
+
+    Returns path, table count, and a list of all tables.
     """
     try:
         parsed: Any = jmd_to_dict(document)
@@ -395,6 +234,9 @@ def read(document: str) -> str:
     Returns a #! document with column names, types, and modifiers.
 
         #! Order
+
+    Use ``read("#! Database")`` to discover all tables, supported
+    frontmatter keys, filter operators, and tolerance policies.
     """
     try:
         return _t().read(document)
@@ -442,12 +284,21 @@ def delete(document: str) -> str:
 
     Delete document (#- Label): delete matching records.
     All fields act as filters. At least one field is required.
-    Returns the number of deleted records.
+    Returns the deleted record as confirmation.
 
         #- Order
         id: 42
 
+    Bulk delete (#- Label[]): delete by primary-key list.
+
+        #- Order[]
+        - 42
+        - 43
+
     Schema document (#! Label): drop the entire table.
+    Requires ``confirm: drop-table`` in frontmatter.
+
+        confirm: drop-table
 
         #! Order
     """

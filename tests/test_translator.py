@@ -622,11 +622,13 @@ class TestSchemaLifecycle:
         assert "Sprocket" in result
 
     def test_drop_table(self, empty: SQLTranslator) -> None:
-        """#! delete drops the table."""
+        """#! delete drops the table when confirmed."""
         empty.write(
             "#! Widgets\nid: integer readonly\nname: string"
         )
-        result = empty.delete("#! Widgets")
+        result = empty.delete(
+            "confirm: drop-table\n\n#! Widgets"
+        )
         assert "dropped" in result or "Widgets" in result
 
     def test_dropped_table_is_gone(self, empty: SQLTranslator) -> None:
@@ -634,15 +636,28 @@ class TestSchemaLifecycle:
         empty.write(
             "#! Widgets\nid: integer readonly\nname: string"
         )
-        empty.delete("#! Widgets")
+        empty.delete("confirm: drop-table\n\n#! Widgets")
         with pytest.raises(ValueError, match="Widgets"):
             empty.read("#! Widgets")
+
+    def test_drop_without_confirm_returns_error(
+        self, empty: SQLTranslator
+    ) -> None:
+        """#! delete without confirm: drop-table is rejected."""
+        empty.write(
+            "#! Widgets\nid: integer readonly\nname: string"
+        )
+        result = empty.delete("#! Widgets")
+        assert "# Error" in result
+        assert "confirmation_required" in result
 
     def test_drop_nonexistent_table_returns_error(
         self, empty: SQLTranslator
     ) -> None:
         """Dropping a table that does not exist returns a 404 Error."""
-        result = empty.delete("#! NoSuchTable")
+        result = empty.delete(
+            "confirm: drop-table\n\n#! NoSuchTable"
+        )
         assert "# Error" in result
         assert "404" in result
 
@@ -741,3 +756,196 @@ class TestReadSchema:
         assert "OrderID: integer" in result
         assert "Freight: float" in result
         assert "ShipCountry: string" in result
+
+
+# -----------------------------------------------------------
+# 13. TestRootSchema — read("#! Database")
+# -----------------------------------------------------------
+
+
+class TestRootSchema:
+    """Tests for the root-schema read (#! Database)."""
+
+    def test_root_schema_starts_with_heading(
+        self, nw: SQLTranslator
+    ) -> None:
+        """Root-schema starts with #! Database."""
+        result = nw.read("#! Database")
+        assert result.startswith("#! Database")
+
+    def test_root_schema_lists_tables(
+        self, nw: SQLTranslator
+    ) -> None:
+        """Root-schema contains the tables array."""
+        result = nw.read("#! Database")
+        assert "## tables[]" in result
+        assert "- Orders" in result
+        assert "- Customers" in result
+
+    def test_root_schema_contains_read_frontmatter(
+        self, nw: SQLTranslator
+    ) -> None:
+        """Root-schema documents read frontmatter keys."""
+        result = nw.read("#! Database")
+        assert "## read" in result
+        assert "page-size:" in result
+        assert "join:" in result
+        assert "sum:" in result
+
+    def test_root_schema_contains_filter_operators(
+        self, nw: SQLTranslator
+    ) -> None:
+        """Root-schema lists QBE filter operators."""
+        result = nw.read("#! Database")
+        assert "### filter-operators" in result
+        assert "~:" in result
+        assert "|:" in result
+
+    def test_root_schema_contains_policies(
+        self, nw: SQLTranslator
+    ) -> None:
+        """Root-schema contains frontmatter tolerance policies."""
+        result = nw.read("#! Database")
+        assert "## frontmatter-policy" in result
+        assert "observable-tolerance" in result
+        assert "strict-refusal" in result
+
+    def test_root_schema_contains_notes(
+        self, nw: SQLTranslator
+    ) -> None:
+        """Root-schema contains SQLite-specific notes."""
+        result = nw.read("#! Database")
+        assert "boolean" in result
+        assert "integer" in result
+
+    def test_real_table_named_database_takes_precedence(
+        self, empty: SQLTranslator
+    ) -> None:
+        """A real table named Database gets its schema, not root."""
+        empty.write(
+            "#! Database\nid: integer readonly\nname: string"
+        )
+        result = empty.read("#! Database")
+        assert "id: integer readonly" in result
+        assert "## tables[]" not in result
+
+
+# -----------------------------------------------------------
+# 14. TestFrontmatterTolerance — §3.5 / §23.7
+# -----------------------------------------------------------
+
+
+# -----------------------------------------------------------
+# 15. TestBulkDelete — #- Table[]
+# -----------------------------------------------------------
+
+
+class TestBulkDelete:
+    """Tests for bulk-delete documents (#- Table[])."""
+
+    def test_bulk_delete_scalar_ids(
+        self, nw_rw: SQLTranslator
+    ) -> None:
+        """Bulk-delete with scalar PK values."""
+        # Insert test rows.
+        nw_rw.write(
+            "# Orders\nOrderID: 88881\nShipCountry: BulkA"
+        )
+        nw_rw.write(
+            "# Orders\nOrderID: 88882\nShipCountry: BulkB"
+        )
+        result = nw_rw.delete(
+            "#- Orders[]\n- 88881\n- 88882"
+        )
+        assert "88881" in result
+        assert "88882" in result
+
+    def test_bulk_delete_returns_array(
+        self, nw_rw: SQLTranslator
+    ) -> None:
+        """Bulk-delete returns a JMD array document."""
+        nw_rw.write(
+            "# Orders\nOrderID: 88883\nShipCountry: BulkC"
+        )
+        nw_rw.write(
+            "# Orders\nOrderID: 88884\nShipCountry: BulkD"
+        )
+        result = nw_rw.delete(
+            "#- Orders[]\n- 88883\n- 88884"
+        )
+        assert "# Orders[]" in result
+
+    def test_bulk_delete_empty_list_rejected(
+        self, nw_rw: SQLTranslator
+    ) -> None:
+        """Bulk-delete with empty list returns error."""
+        result = nw_rw.delete("#- Orders[]")
+        assert "# Error" in result
+
+    def test_bulk_delete_empty_label_rejected(
+        self, nw_rw: SQLTranslator
+    ) -> None:
+        """Bulk-delete without table label returns error."""
+        result = nw_rw.delete("#- []\n- 1\n- 2")
+        assert "# Error" in result
+        assert "label" in result.lower()
+
+
+class TestFrontmatterTolerance:
+    """Tests for frontmatter tolerance policies."""
+
+    def test_read_data_unknown_key_echoed(
+        self, nw: SQLTranslator
+    ) -> None:
+        """Unknown key on data-mode read is echoed."""
+        result = nw.read(
+            "foobar: 42\n\n# Shippers\nShipperID: 1"
+        )
+        assert result.startswith("ignored-keys: foobar")
+
+    def test_query_unknown_key_echoed(
+        self, nw: SQLTranslator
+    ) -> None:
+        """Unknown key on query-mode read is echoed."""
+        result = nw.read(
+            "foobar: 42\npage-size: 5\n\n#? Orders"
+        )
+        assert "ignored-keys: foobar" in result
+
+    def test_known_keys_not_echoed(
+        self, nw: SQLTranslator
+    ) -> None:
+        """Known keys do not produce ignored-keys header."""
+        result = nw.read("page-size: 5\n\n#? Orders")
+        assert "ignored-keys" not in result
+
+    def test_write_unknown_key_echoed(
+        self, nw_rw: SQLTranslator
+    ) -> None:
+        """Unknown key on write is echoed."""
+        result = nw_rw.write(
+            "batch: 10\n\n# Orders\n"
+            "OrderID: 99999\nShipCountry: Test"
+        )
+        assert result.startswith("ignored-keys: batch")
+
+    def test_delete_unknown_key_rejected(
+        self, nw_rw: SQLTranslator
+    ) -> None:
+        """Unknown key on delete raises ValueError (strict)."""
+        with pytest.raises(ValueError, match="dry-run"):
+            nw_rw.delete(
+                "dry-run: true\n\n#- Orders\nOrderID: 99999"
+            )
+
+    def test_delete_known_key_accepted(
+        self, nw_rw: SQLTranslator
+    ) -> None:
+        """Known key 'confirm' on delete does not raise."""
+        # confirm without drop-table value — not a drop op,
+        # so it just passes through to the normal delete path.
+        result = nw_rw.delete(
+            "confirm: something\n\n#- Orders\nOrderID: 99999"
+        )
+        # Should reach the normal "not found" path, not error.
+        assert "# Error" in result or "# Orders" in result
