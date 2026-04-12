@@ -1082,9 +1082,17 @@ class SQLTranslator:
             "confirm: required value 'drop-table' for #! table drops"
         )
 
+        # -- Operations: open --------------------------------------
+        lines.append("")
+        lines.append("## open")
+        lines.append("")
+        lines.append("### frontmatter")
+        lines.append("path: database file path to open")
+
         # -- Frontmatter policy ------------------------------------
         lines.append("")
         lines.append("## frontmatter-policy")
+        lines.append("open: observable-tolerance")
         lines.append("read: observable-tolerance")
         lines.append("write: observable-tolerance")
         lines.append(

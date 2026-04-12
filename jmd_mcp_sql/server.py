@@ -28,11 +28,15 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from jmd import jmd_to_dict, serialize
+from jmd import JMDParser, serialize
 from mcp.server.fastmcp import FastMCP
 
 from .config import load as load_config
-from .translator import SQLTranslator
+from .translator import (
+    SQLTranslator,
+    _check_frontmatter,
+    _prepend_ignored_keys,
+)
 
 _INSTRUCTIONS = """\
 This server exposes a SQLite database through four JMD tools:
@@ -184,7 +188,13 @@ def open_database(document: str) -> str:
     Returns path, table count, and a list of all tables.
     """
     try:
-        parsed: Any = jmd_to_dict(document)
+        parser = JMDParser()
+        parsed: Any = parser.parse(document)
+        ignored = _check_frontmatter(
+            parser.frontmatter,
+            frozenset({"path"}),
+            "observable",
+        )
         path_value = parsed.get("path") if isinstance(parsed, dict) else None
 
         if path_value is None:
@@ -198,10 +208,10 @@ def open_database(document: str) -> str:
                     },
                     label="Error",
                 )
-            return _db_status()
+            return _prepend_ignored_keys(_db_status(), ignored)
 
         db_path = _resolve_db_path(str(path_value))
-        return _open_db(db_path)
+        return _prepend_ignored_keys(_open_db(db_path), ignored)
     except ValueError as exc:
         return serialize(
             {"status": 403, "code": "path_denied", "message": str(exc)},
