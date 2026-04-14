@@ -38,36 +38,9 @@ from .translator import (
     _prepend_ignored_keys,
 )
 
-_INSTRUCTIONS = """\
-This server exposes a SQLite database through four JMD tools:
-open, read, write, delete.
-
-## Getting started
-
-Run read("#! Database") to discover this server's full capabilities:
-available tables, supported frontmatter keys, filter operators,
-and tolerance policies.
-
-## JMD document syntax
-
-Every document has an optional frontmatter block (before the heading)
-and a mandatory heading line:
-
-  # Product          data document   (lookup / insert)
-  #? Product         query document  (filter / list)
-  #! Product         schema document (describe / create)
-  #- Product         delete document (remove records)
-
-Frontmatter keys (e.g. page-size, join, sort) go BEFORE the heading.
-Data/filter fields go AFTER the heading. Mixing them up is the most
-common mistake — a filter field in the frontmatter position is silently
-treated as metadata, not as a filter.
-
-## Error handling
-
-All tools return a # Error document on failure.
-Check the code field to decide how to proceed.
-"""
+_INSTRUCTIONS = (
+    'This is JMD not SQL. Read "#! Database" to learn how.'
+)
 
 # Global FastMCP instance.  Tool functions are registered via @mcp.tool()
 # decorators below and become available to the MCP host on connection.
@@ -226,7 +199,7 @@ def open_database(document: str) -> str:
 
 @mcp.tool()
 def read(document: str) -> str:
-    """Read records or table schema using a JMD document.
+    """Read records or table schema using a JMD document (https://github.com/ostermeyer/jmd-spec).
 
     Data document (# Label): look up records by exact field values.
     Returns a single record if exactly one matches, a list otherwise.
@@ -259,7 +232,7 @@ def read(document: str) -> str:
 
 @mcp.tool()
 def write(document: str) -> str:
-    """Write a record or define a table schema using a JMD document.
+    """Write a record or define a table schema using a JMD document (https://github.com/ostermeyer/jmd-spec).
 
     Data document (# Label): insert or replace a record.
     If a record with the same primary key exists, it is replaced.
@@ -298,7 +271,7 @@ def write(document: str) -> str:
 
 @mcp.tool()
 def delete(document: str) -> str:
-    """Delete records or drop a table using a JMD document.
+    """Delete records or drop a table using a JMD document (https://github.com/ostermeyer/jmd-spec).
 
     Delete document (#- Label): delete matching records.
     All fields act as filters. At least one field is required.
