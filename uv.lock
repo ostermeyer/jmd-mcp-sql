@@ -295,7 +295,7 @@ requires-dist = [{ name = "lxml", specifier = ">=5.0" }]
 
 [[package]]
 name = "jmd-mcp-sql"
-version = "0.7.0"
+version = "0.7.1"
 source = { editable = "." }
 dependencies = [
     { name = "jmd-format" },

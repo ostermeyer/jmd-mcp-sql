@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jmd-mcp-sql"
-version = "0.7.0"
+version = "0.7.1"
 description = "JMD-based MCP server for SQLite — natural language database interface"
 readme = "README.md"
 license = { file = "LICENSE" }
