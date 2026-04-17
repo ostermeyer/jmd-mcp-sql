@@ -460,3 +460,14 @@ This MCP server is licensed under the **[GNU Affero General Public License v3.0]
 You can adopt, implement, or build on JMD freely in any language, under any license, in any environment. The AGPL-3.0 on this server governs only its specific integration code.
 
 **Commercial licensing** for this server (without AGPL-3.0 obligations) is available on request: andreas@ostermeyer.de
+
+### License history
+
+Versions 0.4 through 0.7.1 were published on PyPI under the MIT License.
+Starting with **v0.8.0** (2026-04-17), this project is licensed under AGPL-3.0.
+
+- Users who installed 0.4–0.7.1 retain the rights MIT grants for those specific
+  versions — the license change is not retroactive and cannot be.
+- The 0.x MIT versions have been **yanked** on PyPI: they remain installable
+  with an explicit version pin but are no longer the default install target.
+- See [CHANGELOG.md](CHANGELOG.md) for the full rationale.
