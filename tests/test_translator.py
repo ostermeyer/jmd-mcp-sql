@@ -782,41 +782,29 @@ class TestRootSchema:
         assert "- Orders" in result
         assert "- Customers" in result
 
-    def test_root_schema_contains_read_frontmatter(
+    def test_root_schema_is_pure_entity(
         self, nw: SQLTranslator
     ) -> None:
-        """Root-schema documents read frontmatter keys."""
-        result = nw.read("#! Database")
-        assert "## read" in result
-        assert "page-size:" in result
-        assert "join:" in result
-        assert "sum:" in result
+        """Root-schema describes the Database entity only.
 
-    def test_root_schema_contains_filter_operators(
-        self, nw: SQLTranslator
-    ) -> None:
-        """Root-schema lists QBE filter operators."""
+        Server capabilities (frontmatter keys, filter operators,
+        tolerance policies, debug values) belong in the tool
+        descriptions, not in the entity schema.  This test guards
+        against the old pattern of mixing entity info with
+        server-meta info in #! Database.
+        """
         result = nw.read("#! Database")
-        assert "### filter-operators" in result
-        assert "~:" in result
-        assert "|:" in result
-
-    def test_root_schema_contains_policies(
-        self, nw: SQLTranslator
-    ) -> None:
-        """Root-schema contains frontmatter tolerance policies."""
-        result = nw.read("#! Database")
-        assert "## frontmatter-policy" in result
-        assert "observable-tolerance" in result
-        assert "strict-refusal" in result
-
-    def test_root_schema_contains_notes(
-        self, nw: SQLTranslator
-    ) -> None:
-        """Root-schema contains SQLite-specific notes."""
-        result = nw.read("#! Database")
-        assert "boolean" in result
-        assert "integer" in result
+        # Entity content present.
+        assert result.startswith("#! Database")
+        assert "## tables[]" in result
+        # Server-meta content absent.
+        assert "## read" not in result
+        assert "## write" not in result
+        assert "## delete" not in result
+        assert "## open" not in result
+        assert "## frontmatter-policy" not in result
+        assert "## debug" not in result
+        assert "### filter-operators" not in result
 
     def test_real_table_named_database_takes_precedence(
         self, empty: SQLTranslator
@@ -1204,11 +1192,7 @@ class TestDebugMode:
         )
         assert "debug-coercion-ShipCountry:" in result
 
-    def test_debug_in_root_schema(
-        self, nw: SQLTranslator
-    ) -> None:
-        """Root schema documents the debug feature."""
-        result = nw.read("#! Database")
-        assert "## debug" in result
-        assert "sql:" in result
-        assert "NOT a dry-run" in result
+    # NOTE: debug info used to be documented in #! Database, but
+    # that mixed entity schema with server-meta info.  Debug is
+    # now documented in each tool's docstring — see the 'read',
+    # 'write', 'delete' descriptions in server.py.

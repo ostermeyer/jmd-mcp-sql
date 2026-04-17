@@ -463,11 +463,20 @@ def _parse_debug(fm: dict[str, Any]) -> DebugInfo:
     Returns a :class:`DebugInfo` with the requested values
     separated into known and unknown.  If ``debug`` is not
     present in *fm*, returns an inactive DebugInfo.
+
+    Special values:
+      * ``true`` (or the boolean ``True``) — alias for "all
+        known debug channels".  This matches the natural LLM
+        intuition of using ``debug: true`` as a boolean flag.
     """
     raw = fm.get("debug")
     if raw is None:
         return DebugInfo(
             requested=frozenset(), unknown=[]
+        )
+    if raw is True or str(raw).strip().lower() == "true":
+        return DebugInfo(
+            requested=_KNOWN_DEBUG_VALUES, unknown=[]
         )
     values = {
         v.strip()
@@ -489,6 +498,31 @@ def _prepend_debug(
     return f"{fm}\n\n{response}"
 
 
+class StrictRefusalError(ValueError):
+    """Raised when strict refusal rejects unknown frontmatter keys.
+
+    Inherits from :class:`ValueError` so existing ``except
+    ValueError`` paths continue to work.  The structured
+    attributes ``unknown`` and ``accepted`` let callers build
+    detailed error responses.
+    """
+
+    def __init__(
+        self, unknown: list[str], accepted: list[str],
+    ) -> None:
+        """Initialise the error with unknown and accepted keys."""
+        self.unknown = unknown
+        self.accepted = accepted
+        accepted_str = (
+            ", ".join(accepted) if accepted else "(none)"
+        )
+        super().__init__(
+            f"Unknown frontmatter key(s) {unknown!r} on a"
+            " destructive operation. Accepted keys:"
+            f" {accepted_str}."
+        )
+
+
 def _check_frontmatter(
     fm: dict[str, Any],
     known: frozenset[str],
@@ -506,15 +540,13 @@ def _check_frontmatter(
         List of unknown key names (may be empty).
 
     Raises:
-        ValueError: When *policy* is ``"strict"`` and unknown
-            keys are present.
+        StrictRefusalError: When *policy* is ``"strict"`` and
+            unknown keys are present.
     """
     unknown = [k for k in fm if k not in known]
     if unknown and policy == "strict":
-        raise ValueError(
-            f"Unknown frontmatter key(s) {unknown!r} on a"
-            " destructive operation. Accepted keys:"
-            f" {sorted(known) or '(none)'}."
+        raise StrictRefusalError(
+            unknown=unknown, accepted=sorted(known),
         )
     return unknown
 
@@ -1399,145 +1431,13 @@ class SQLTranslator:
 
         lines: list[str] = ["#! Database"]
 
-        # -- Tables ------------------------------------------------
+        # Tables — the only entity-level information about a
+        # Database.  Server capabilities (frontmatter keys, filter
+        # operators, tolerance policies, debug values) belong in
+        # the tool descriptions, not in entity schemas.
         lines.append("## tables[]")
         for t in tables:
             lines.append(f"- {t}")
-
-        # -- Operations: read --------------------------------------
-        lines.append("")
-        lines.append("## read")
-        lines.append("")
-        lines.append("### frontmatter")
-        for key, desc in (
-            ("select", "column projection (comma-separated)"),
-            ("join", "TableName on JoinCol (comma-sep)"),
-            ("sum", "expression as alias"),
-            ("avg", "expression as alias"),
-            ("min", "expression as alias"),
-            ("max", "expression as alias"),
-            ("count", "(bare key) count rows"),
-            ("group", "col1, col2"),
-            ("having", "post-aggregation filter"),
-            ("sort", "col asc/desc"),
-            ("page-size", "integer (pagination size)"),
-            ("page", "integer (1-based page number)"),
-        ):
-            lines.append(f"{key}: {desc}")
-
-        lines.append("")
-        lines.append("### filter-operators")
-        for op, desc in (
-            ("=", "equality (default when no operator)"),
-            (">", "greater than"),
-            (">=", "greater or equal"),
-            ("<", "less than"),
-            ("<=", "less or equal"),
-            ("|", "alternation (OR)"),
-            ("~", "substring (contains, case-insensitive)"),
-            ("^", "regex (implicit full-match anchoring)"),
-            ("!", "negation (composable with any operator)"),
-        ):
-            lines.append(f"{op}: {desc}")
-
-        # -- Operations: write -------------------------------------
-        lines.append("")
-        lines.append("## write")
-        lines.append("")
-        lines.append("### frontmatter")
-        lines.append("(none currently supported)")
-
-        # -- Operations: delete ------------------------------------
-        lines.append("")
-        lines.append("## delete")
-        lines.append("")
-        lines.append("### frontmatter")
-        lines.append(
-            "confirm: required value 'drop-table' for #! table drops"
-        )
-
-        # -- Operations: open --------------------------------------
-        lines.append("")
-        lines.append("## open")
-        lines.append("")
-        lines.append("### frontmatter")
-        lines.append("path: database file path to open")
-
-        # -- Frontmatter policy ------------------------------------
-        lines.append("")
-        lines.append("## frontmatter-policy")
-        lines.append("open: observable-tolerance")
-        lines.append("read: observable-tolerance")
-        lines.append("write: observable-tolerance")
-        lines.append(
-            "delete: strict-refusal (unknown keys cause an error)"
-        )
-
-        # -- Debug mode --------------------------------------------
-        lines.append("")
-        lines.append("## debug")
-        lines.append(
-            "Use debug: in frontmatter to inspect internals."
-            " Comma-separated, composable."
-        )
-        lines.append("")
-        lines.append("### values")
-        for val, desc in (
-            ("sql", "generated SQL statement"),
-            ("timing", "execution time in ms"),
-            ("table", "resolved table name"),
-            ("filters", "field-to-SQL filter mapping"),
-            ("plan", "EXPLAIN QUERY PLAN output"),
-            ("resolved", "frontmatter key-to-SQL mapping"),
-            ("coercions", "type coercion details"),
-        ):
-            lines.append(f"{val}: {desc}")
-        lines.append("")
-        lines.append("### example")
-        lines.append("debug: sql, timing")
-        lines.append("")
-        lines.append("#? Orders")
-        lines.append("ShipCountry: Germany")
-        lines.append("")
-        lines.append("### response-keys")
-        lines.append(
-            "debug-sql: the SQL that was executed"
-        )
-        lines.append(
-            "debug-timing: execution time (e.g. 1.2ms)"
-        )
-        lines.append(
-            "debug-unknown: unrecognized debug values"
-        )
-        lines.append("")
-        lines.append("### warning")
-        lines.append(
-            "debug on delete shows SQL but STILL EXECUTES."
-            " It is NOT a dry-run."
-        )
-
-        # -- Notes -------------------------------------------------
-        lines.append("")
-        lines.append("## notes[]")
-        lines.append(
-            "- boolean is stored as integer (0/1)"
-            " due to SQLite limitation"
-        )
-        lines.append(
-            "- column names in filters are case-sensitive"
-        )
-        lines.append(
-            "- frontmatter keys go BEFORE the heading,"
-            " filter fields AFTER"
-        )
-        lines.append(
-            "- unknown frontmatter keys on read/write are"
-            " echoed as ignored-keys in the response"
-        )
-        lines.append(
-            "- unknown frontmatter keys on delete cause a"
-            " structured error (strict refusal)"
-        )
 
         return "\n".join(lines)
 
