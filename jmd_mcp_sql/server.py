@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """JMD MCP server for SQLite.
 
 This module wires together the MCP framework (FastMCP), the SQL translator,

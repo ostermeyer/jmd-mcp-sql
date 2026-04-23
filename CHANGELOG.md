@@ -2,6 +2,34 @@
 
 All notable changes to `jmd-mcp-sql` are documented here.
 
+## 0.10.0 — 2026-04-23
+
+### License change: AGPL-3.0 → Apache 2.0
+
+Aligned with the rest of the JMD ecosystem. The JMD specification is published
+under CC BY 4.0; the reference implementations `jmd-impl` and `jmd-js` are
+Apache 2.0. For consistency — and because the goal of this project is adoption,
+not product protection — this server now matches: **Apache 2.0, no copyleft,
+no dual licensing, no CLA**. Use it, fork it, extend it, ship it. Attribution
+is preserved per Apache 2.0 § 4.
+
+**Why the reversal.** The AGPL-3.0 decision in 0.8.0 reflected a brief period
+in which a commercial deployment path was under consideration. That path has
+since been abandoned in favour of open-standard adoption. Under the new
+framing, AGPL protected against a risk that no longer exists and imposed
+real adoption friction — many corporate environments pre-emptively block
+AGPL code. Apache 2.0 removes that friction while preserving attribution.
+
+**Prior versions.** Releases 0.8.0 – 0.9.x remain available and legally
+usable under AGPL-3.0 for anyone who installed them during that window.
+License changes are not retroactive.
+
+### No functional changes in 0.10.0
+
+0.10.0 is a license-only release — no API changes, no behavior changes, no
+schema changes relative to 0.9.0. All changes are in license metadata,
+SPDX identifiers, and documentation.
+
 ## 0.8.0 — 2026-04-17
 
 ### License change: MIT → AGPL-3.0

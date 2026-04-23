@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """JMD document → SQL translation.
 
 This module is the heart of the MCP server.  It receives JMD documents

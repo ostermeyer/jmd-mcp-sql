@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for the ``open`` tool, path validation, and config loading."""
 from __future__ import annotations
 

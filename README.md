@@ -450,24 +450,23 @@ The JMD format is documented at [jmd-spec](https://github.com/ostermeyer/jmd-spe
 
 ## License
 
-This MCP server is licensed under the **[GNU Affero General Public License v3.0](LICENSE)** (AGPL-3.0).
+Copyright © 2026 Andreas Ostermeyer.
 
-**Important clarification.** JMD itself is open and permissively licensed — this server's AGPL obligations apply only to this server's code, not to JMD:
-
-- **JMD specification** — [CC BY 4.0](https://github.com/ostermeyer/jmd-spec/blob/main/LICENSE) — free for any use including commercial, with attribution
-- **JMD reference implementations** — Apache 2.0 ([jmd-impl (Python)](https://github.com/ostermeyer/jmd-impl), [jmd-js (JavaScript)](https://github.com/ostermeyer/jmd-js))
-
-You can adopt, implement, or build on JMD freely in any language, under any license, in any environment. The AGPL-3.0 on this server governs only its specific integration code.
-
-**Commercial licensing** for this server (without AGPL-3.0 obligations) is available on request: andreas@ostermeyer.de
+Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE).
+The JMD ecosystem is open: the specification is CC BY 4.0, the Python and
+JavaScript reference implementations are Apache 2.0, and this server matches.
+No copyleft, no dual licensing, no CLA. Use it, fork it, extend it, ship it —
+attribution preserved per Apache 2.0 § 4.
 
 ### License history
 
-Versions 0.4 through 0.7.1 were published on PyPI under the MIT License.
-Starting with **v0.8.0** (2026-04-17), this project is licensed under AGPL-3.0.
+This project has changed license twice during its early development:
 
-- Users who installed 0.4–0.7.1 retain the rights MIT grants for those specific
-  versions — the license change is not retroactive and cannot be.
-- The 0.x MIT versions have been **yanked** on PyPI: they remain installable
-  with an explicit version pin but are no longer the default install target.
-- See [CHANGELOG.md](CHANGELOG.md) for the full rationale.
+- **0.4 – 0.7.1** (MIT, yanked from PyPI as the default install target)
+- **0.8.0 – 0.9.x** (AGPL-3.0, reflecting a brief period in which a commercial
+  deployment path was under consideration)
+- **0.10.0 and later** (Apache 2.0, aligned with the rest of the JMD ecosystem)
+
+Users who installed any of the prior versions retain the rights those licenses
+granted for those specific artifacts. License changes are not retroactive.
+See [CHANGELOG.md](CHANGELOG.md) for the rationale.

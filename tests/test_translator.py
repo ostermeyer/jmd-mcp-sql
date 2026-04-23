@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Comprehensive unit tests for SQLTranslator.
 
 Tests cover all three public methods (read, write, delete) across all four

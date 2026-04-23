@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """SQLite schema introspection — table and column metadata.
 
 This module is intentionally kept separate from the SQL-translation layer

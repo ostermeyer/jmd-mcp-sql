@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Configuration for jmd-mcp-sql.
 
 Reads optional settings from ``~/.config/jmd/sql.jmd``.  All settings
