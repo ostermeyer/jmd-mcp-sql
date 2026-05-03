@@ -32,13 +32,13 @@ from typing import Any
 from jmd import JMDParser, serialize
 from mcp.server.fastmcp import FastMCP
 
-from .config import load as load_config
-from .translator import (
-    SQLTranslator,
+from ._debug import (
     StrictRefusalError,
     _check_frontmatter,
     _prepend_ignored_keys,
 )
+from .config import load as load_config
+from .translator import SQLTranslator
 
 _INSTRUCTIONS = (
     'This is JMD not SQL. Read "#! Database" to learn how.'
