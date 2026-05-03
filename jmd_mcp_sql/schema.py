@@ -19,6 +19,9 @@ class ColumnInfo:
     type: str          # SQLite declared type, e.g. "TEXT", "INTEGER", "REAL"
     primary_key: bool
     nullable: bool     # True when the column has no NOT NULL constraint
+    # Raw default expression from PRAGMA dflt_value (e.g. "0",
+    # "'pending'", or NULL when no default is declared).
+    default: str | None = None
 
 
 @dataclass
@@ -115,6 +118,7 @@ class SchemaInspector:
                     type=row[2],
                     primary_key=bool(row[5]),  # pk > 0 means part of PK
                     nullable=not row[3],        # notnull=1 → not nullable
+                    default=row[4],            # raw dflt_value, may be None
                 )
                 for row in cur.fetchall()
             ]

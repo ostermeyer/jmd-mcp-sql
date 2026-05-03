@@ -372,6 +372,234 @@ _JMD_TO_SQLITE: dict[str, str] = {
 }
 
 
+# -- DDL helpers (Slice A: full table-schema) ----------------------
+
+
+def _quote_default(value: Any) -> str:
+    """Format a Python scalar as a SQL literal for DEFAULT/CHECK.
+
+    Bareword keywords like CURRENT_TIMESTAMP pass through unquoted;
+    integers and floats render directly; booleans collapse to 0/1
+    (SQLite has no native BOOLEAN); strings are single-quoted with
+    embedded apostrophes doubled per SQL convention.
+    """
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        return str(value)
+    s = str(value)
+    if s.upper() in {
+        "CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME", "NULL",
+    }:
+        return s.upper()
+    return "'" + s.replace("'", "''") + "'"
+
+
+def _unquote_default_for_jmd(raw: str) -> str:
+    """Render a SQLite-stored default value for a JMD `= …` token.
+
+    SQLite returns DEFAULTs as raw expressions: integers as bare
+    numbers, strings single-quoted, keywords as bareword. JMD's
+    `= value` syntax is unquoted, so we strip the SQL quoting.
+    """
+    s = raw.strip()
+    if s.startswith("'") and s.endswith("'"):
+        return s[1:-1].replace("''", "'")
+    return s
+
+
+def _as_string_list(value: Any) -> list[str]:
+    """Coerce a JMD sub-section value to a list of non-empty strings.
+
+    JMDParser returns ``## name[]`` sub-sections in three shapes
+    depending on bullet content:
+      - bare scalars (``- foo``)        → list[str]
+      - colon entries (``- a: b``)       → list[dict] (single-key)
+      - mixed                            → list[Any]
+    For DDL sub-sections we always want a flat list of strings
+    that the caller can split / regex; dict entries are flattened
+    back to ``key: value`` text.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            for k, v in item.items():
+                out.append(f"{k}: {v}".strip())
+        else:
+            s = str(item).strip()
+            if s:
+                out.append(s)
+    return out
+
+
+def _split_columns(entry: str) -> list[str]:
+    """Split a comma-separated column-list entry into trimmed names."""
+    return [c.strip() for c in entry.split(",") if c.strip()]
+
+
+def _split_top_level(body: str) -> list[str]:
+    """Split a string on top-level commas (depth-0 in parens).
+
+    Used to parse CREATE TABLE bodies into column-defs and
+    table-level constraint clauses.
+    """
+    parts: list[str] = []
+    depth = 0
+    cur: list[str] = []
+    in_string = False
+    for ch in body:
+        if ch == "'" and not in_string:
+            in_string = True
+            cur.append(ch)
+        elif ch == "'" and in_string:
+            in_string = False
+            cur.append(ch)
+        elif in_string:
+            cur.append(ch)
+        elif ch == "(":
+            depth += 1
+            cur.append(ch)
+        elif ch == ")":
+            depth -= 1
+            cur.append(ch)
+        elif ch == "," and depth == 0:
+            piece = "".join(cur).strip()
+            if piece:
+                parts.append(piece)
+            cur = []
+        else:
+            cur.append(ch)
+    piece = "".join(cur).strip()
+    if piece:
+        parts.append(piece)
+    return parts
+
+
+_TABLE_CONSTRAINT_RE = re.compile(
+    r"^\s*(?:CONSTRAINT\s+\S+\s+)?"
+    r"(PRIMARY\s+KEY|UNIQUE|CHECK|FOREIGN\s+KEY)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_table_level_constraint(part: str) -> bool:
+    """Return True if a CREATE-TABLE body part is a constraint clause."""
+    return bool(_TABLE_CONSTRAINT_RE.match(part))
+
+
+def _extract_create_table_body(create_sql: str) -> str:
+    """Return the parenthesised column/constraint body of a CREATE TABLE."""
+    first = create_sql.find("(")
+    last = create_sql.rfind(")")
+    if first < 0 or last < 0 or last <= first:
+        return ""
+    return create_sql[first + 1 : last]
+
+
+def _column_part_name(part: str) -> str | None:
+    """Pull the column name from a column-def part (quoted or bare)."""
+    m = re.match(r"^\s*\"([^\"]+)\"", part)
+    if m:
+        return m.group(1)
+    m = re.match(r"^\s*([A-Za-z_][\w]*)", part)
+    return m.group(1) if m else None
+
+
+def _column_enum_values(col_part: str, col_name: str) -> list[str] | None:
+    """Pull values from a column-level ``CHECK (col IN (...))`` clause."""
+    pattern = (
+        r"CHECK\s*\(\s*\"" + re.escape(col_name) + r"\"\s+IN\s*\("
+        r"([^)]+)\)\s*\)"
+    )
+    m = re.search(pattern, col_part, re.IGNORECASE)
+    if not m:
+        return None
+    return [
+        v.strip().strip("'").replace("''", "'")
+        for v in m.group(1).split(",")
+    ]
+
+
+def _table_check_clauses(parts: list[str]) -> list[str]:
+    """Extract inner expressions of every table-level CHECK constraint."""
+    out: list[str] = []
+    for p in parts:
+        m = re.match(
+            r"^\s*(?:CONSTRAINT\s+\S+\s+)?CHECK\s*\((.*)\)\s*$",
+            p,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if m:
+            out.append(m.group(1).strip())
+    return out
+
+
+def _table_unique_constraints(
+    conn: sqlite3.Connection, table_name: str
+) -> list[list[str]]:
+    """Return UNIQUE column-groups (excluding PK) for *table_name*.
+
+    Uses ``PRAGMA index_list`` filtered by ``origin = 'u'`` (explicit
+    table-level UNIQUE constraints, not user-created CREATE INDEX).
+    """
+    qt = _quote_identifier(table_name)
+    rows = conn.execute(f"PRAGMA index_list({qt})").fetchall()
+    out: list[list[str]] = []
+    for row in rows:
+        # row: (seq, name, unique, origin, partial)
+        if not bool(row[2]) or row[3] != "u":
+            continue
+        info = conn.execute(
+            f'PRAGMA index_info("{row[1]}")'
+        ).fetchall()
+        # info: (seqno, cid, name)
+        out.append([r[2] for r in info])
+    return out
+
+
+def _parse_reference(entry: str) -> tuple[str, str, str] | None:
+    """Parse a ``## references[]`` entry into (local, table, column).
+
+    Form: ``local_col: ForeignTable.foreign_col``. Returns None on
+    malformed input. Multi-column FKs aren't representable in this
+    sub-section vocabulary in v1.
+    """
+    m = re.match(r"^([^:]+):\s*([^.]+)\.(.+)$", entry.strip())
+    if not m:
+        return None
+    return m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
+
+
+def _table_foreign_keys(
+    conn: sqlite3.Connection, table_name: str
+) -> list[tuple[str, str, str]]:
+    """Return single-column FK refs as (local_col, ref_table, ref_col).
+
+    Multi-column FKs are dropped from the output for v1 — they would
+    need a richer JMD shape than ``local: Table.col`` to round-trip.
+    """
+    qt = _quote_identifier(table_name)
+    rows = conn.execute(f"PRAGMA foreign_key_list({qt})").fetchall()
+    by_id: dict[int, list[tuple[str, str, str]]] = {}
+    for r in rows:
+        # r: (id, seq, table, from, to, on_update, on_delete, match)
+        by_id.setdefault(r[0], []).append((r[3], r[2], r[4]))
+    out: list[tuple[str, str, str]] = []
+    for fk_id in sorted(by_id):
+        cols = by_id[fk_id]
+        if len(cols) == 1:
+            out.append(cols[0])
+    return out
+
+
 # -- Known frontmatter keys per operation (for WP2 tolerance) ------
 
 _KNOWN_FM_READ_DATA: frozenset[str] = frozenset({
@@ -1406,19 +1634,91 @@ class SQLTranslator:
             return self._read_root_schema()
 
         table = self._resolve_or_error(label)
+
+        # Pull the raw DDL: CHECK constraints (column-level for
+        # enum reconstruction, table-level for ## check[]) have no
+        # PRAGMA introspection — we have to parse sqlite_master.
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master"
+            " WHERE type='table' AND name=?",
+            (table.name,),
+        ).fetchone()
+        create_sql = row[0] if row else ""
+        body = _extract_create_table_body(create_sql)
+        parts = _split_top_level(body) if body else []
+        column_part_by_name: dict[str, str] = {}
+        constraint_parts: list[str] = []
+        for p in parts:
+            if _is_table_level_constraint(p):
+                constraint_parts.append(p)
+            else:
+                cn = _column_part_name(p)
+                if cn:
+                    column_part_by_name[cn] = p
+
+        pk_columns = [c for c in table.columns if c.primary_key]
+        composite_pk = len(pk_columns) >= 2
+
         lines = [f"#! {label}"]
         for col in table.columns:
             jmd_type = _sqlite_type_to_jmd(col.type)
-            # Modifiers convey constraints back to the LLM:
-            #   readonly  → primary key (do not supply on insert)
-            #   optional  → nullable (may be omitted)
-            modifiers = []
+            modifiers: list[str] = []
             if col.primary_key:
                 modifiers.append("readonly")
             if col.nullable:
                 modifiers.append("optional")
-            suffix = (" " + " ".join(modifiers)) if modifiers else ""
-            lines.append(f"{col.name}: {jmd_type}{suffix}")
+            # Enum reconstruction: column-level CHECK with IN-list.
+            col_part = column_part_by_name.get(col.name, "")
+            enum_vals = (
+                _column_enum_values(col_part, col.name)
+                if col_part else None
+            )
+            # JMD enum form is `key: a|b|c` — bare pipe-list as
+            # the type token (the spec implies base_type=string).
+            # Adding `string ` in front breaks the parser's pipe
+            # detection, so we emit just the pipe-list when an enum
+            # is present.
+            type_token = (
+                "|".join(enum_vals) if enum_vals else jmd_type
+            )
+            suffix = (
+                " " + " ".join(modifiers) if modifiers else ""
+            )
+            default_token = (
+                f" = {_unquote_default_for_jmd(col.default)}"
+                if col.default is not None else ""
+            )
+            lines.append(
+                f"{col.name}: {type_token}{suffix}{default_token}"
+            )
+
+        if composite_pk:
+            lines.append("")
+            lines.append("## primary-key[]")
+            for pkc in pk_columns:
+                lines.append(f"- {pkc.name}")
+
+        uniques = _table_unique_constraints(self._conn, table.name)
+        if uniques:
+            lines.append("")
+            lines.append("## unique[]")
+            for cols in uniques:
+                lines.append(f"- {', '.join(cols)}")
+
+        table_checks = _table_check_clauses(constraint_parts)
+        if table_checks:
+            lines.append("")
+            lines.append("## check[]")
+            for chk in table_checks:
+                lines.append(f"- {chk}")
+
+        fks = _table_foreign_keys(self._conn, table.name)
+        if fks:
+            lines.append("")
+            lines.append("## references[]")
+            for local, ftab, fcol in fks:
+                lines.append(f"- {local}: {ftab}.{fcol}")
+
         return "\n".join(lines)
 
     def _read_root_schema(self) -> str:
@@ -1445,75 +1745,222 @@ class SQLTranslator:
     def _write_schema(self, jmd_source: str) -> str:
         """Create a new table or add columns to an existing one.
 
-        Non-destructive by design: existing columns are never modified or
-        removed.  Only new columns declared in the document are added.
+        Column-level modifiers ``readonly`` (single-col PK),
+        ``optional`` (NULL), ``= <expr>`` (DEFAULT), and the
+        ``a|b|c`` enum form (column-level CHECK) are honoured.
+
+        Table-level constraints come in via sub-sections:
+            ``## primary-key[]``  composite PK (column names)
+            ``## unique[]``       UNIQUE constraints (one entry =
+                                   comma-separated columns)
+            ``## check[]``        CHECK expressions (raw SQL)
+            ``## references[]``   single-col FKs in the form
+                                   ``local: Table.foreign``
+
+        Non-destructive on existing tables: ALTER only adds columns.
+        Constraint changes on an existing table will land in
+        ``constraint-changes-skipped`` until ``action: rebuild``
+        (Slice F) is implemented.
         """
         schema = JMDSchemaParser().parse(jmd_source)
         table_name = schema.label
 
-        # Only scalar fields map to SQL columns; nested objects/arrays
-        # are not representable in a flat relational schema.
-        scalar_fields = [f for f in schema.fields if isinstance(f, SchemaField)]
+        # Sub-section data is only visible through JMDParser; the
+        # schema parser leaves ``## name[]`` as empty SchemaObjects.
+        data = JMDParser().parse(jmd_source)
+        primary_keys_sec = _as_string_list(data.get("primary-key"))
+        uniques_sec = _as_string_list(data.get("unique"))
+        checks_sec = _as_string_list(data.get("check"))
+        references_sec = _as_string_list(data.get("references"))
+
+        scalar_fields = [
+            f for f in schema.fields if isinstance(f, SchemaField)
+        ]
 
         existing = self._schema.resolve(table_name)
         if existing is not None and existing.is_view:
             return serialize(
                 {"status": 400, "code": "read_only",
-                 "message": f"'{table_name}' is a view and cannot be altered"},
+                 "message": (
+                     f"'{table_name}' is a view"
+                     " and cannot be altered"
+                 )},
                 label="Error",
             )
 
         if existing is None:
-            # Table does not exist — create it from scratch.
-            col_defs = []
-            for f in scalar_fields:
-                sqlite_type = _JMD_TO_SQLITE.get(f.base_type.lower(), "TEXT")
-                pk = " PRIMARY KEY" if f.readonly else ""
-                not_null = "" if f.optional else " NOT NULL"
-                col_defs.append(
-                    f"{_quote_identifier(f.key)} {sqlite_type}{pk}{not_null}"
+            return self._create_table(
+                table_name,
+                scalar_fields,
+                primary_keys_sec,
+                uniques_sec,
+                checks_sec,
+                references_sec,
+            )
+        return self._alter_table(
+            table_name,
+            existing,
+            scalar_fields,
+            bool(
+                primary_keys_sec or uniques_sec or checks_sec
+                or references_sec
+            ),
+        )
+
+    def _create_table(
+        self,
+        table_name: str,
+        scalar_fields: list[SchemaField],
+        primary_keys_sec: list[str],
+        uniques_sec: list[str],
+        checks_sec: list[str],
+        references_sec: list[str],
+    ) -> str:
+        """Render and execute a fresh CREATE TABLE."""
+        # Composite PK is declared at table level; in that case the
+        # individual column defs do *not* emit ``PRIMARY KEY`` inline.
+        composite_pk_cols: list[str] = []
+        for entry in primary_keys_sec:
+            composite_pk_cols.extend(_split_columns(entry))
+        use_table_level_pk = len(composite_pk_cols) >= 2
+
+        col_defs: list[str] = []
+        for f in scalar_fields:
+            col_defs.append(
+                self._render_column_def(f, use_table_level_pk)
+            )
+
+        constraints: list[str] = []
+        if use_table_level_pk:
+            constraints.append(
+                "PRIMARY KEY ("
+                + ", ".join(
+                    _quote_identifier(c) for c in composite_pk_cols
                 )
-            cols_sql = ", ".join(col_defs)
-            self._conn.execute(
-                f"CREATE TABLE {_quote_identifier(table_name)} ({cols_sql})"
+                + ")"
             )
+        for u in uniques_sec:
+            cols = _split_columns(u)
+            if not cols:
+                continue
+            constraints.append(
+                "UNIQUE ("
+                + ", ".join(_quote_identifier(c) for c in cols)
+                + ")"
+            )
+        for c in checks_sec:
+            constraints.append(f"CHECK ({c})")
+        for r in references_sec:
+            fk = _parse_reference(r)
+            if fk is None:
+                return serialize(
+                    {"status": 400, "code": "bad_request",
+                     "message": (
+                         f"references entry {r!r} not in form"
+                         " 'local_col: Table.foreign_col'"
+                     )},
+                    label="Error",
+                )
+            local, ftab, fcol = fk
+            constraints.append(
+                f"FOREIGN KEY ({_quote_identifier(local)}) "
+                f"REFERENCES {_quote_identifier(ftab)}"
+                f"({_quote_identifier(fcol)})"
+            )
+
+        body_sql = ", ".join(col_defs + constraints)
+        sql = (
+            f"CREATE TABLE {_quote_identifier(table_name)}"
+            f" ({body_sql})"
+        )
+        try:
+            self._conn.execute(sql)
             self._conn.commit()
-            # Refresh the schema cache so the new table is immediately visible.
-            self._schema = SchemaInspector(self._conn)
+        except sqlite3.Error as e:
             return serialize(
-                {"table": table_name, "created": True}, label="Result"
+                {"status": 400, "code": "ddl_failed",
+                 "message": str(e)},
+                label="Error",
             )
-        else:
-            # Table exists — add any columns not yet present.
-            # SQLite ALTER TABLE only supports ADD COLUMN; renaming or
-            # removing columns requires recreating the table.
-            existing_cols = {c.name for c in existing.columns}
-            added = []
-            with self._conn:
-                for f in scalar_fields:
-                    if f.key not in existing_cols:
-                        sqlite_type = _JMD_TO_SQLITE.get(
-                            f.base_type.lower(), "TEXT"
-                        )
-                        self._conn.execute(
-                            f"ALTER TABLE {_quote_identifier(table_name)}"
-                            f" ADD COLUMN"
-                            f" {_quote_identifier(f.key)} {sqlite_type}"
-                        )
-                        added.append(f.key)
-            self._schema = SchemaInspector(self._conn)
-            skipped = [
-                f.key for f in scalar_fields
-                if f.key in existing_cols
-            ]
-            result: dict[str, Any] = {
-                "table": table_name,
-                "altered": bool(added),
-                "added": added,
-            }
-            if skipped:
-                result["skipped"] = skipped
-            return serialize(result, label="Result")
+        self._schema = SchemaInspector(self._conn)
+        return serialize(
+            {"table": table_name, "created": True}, label="Result"
+        )
+
+    def _alter_table(
+        self,
+        table_name: str,
+        existing: TableInfo,
+        scalar_fields: list[SchemaField],
+        any_constraint_section: bool,
+    ) -> str:
+        """Additive ALTER: add new columns, never modify existing."""
+        existing_cols = {c.name for c in existing.columns}
+        added: list[str] = []
+        with self._conn:
+            for f in scalar_fields:
+                if f.key in existing_cols:
+                    continue
+                sqlite_type = _JMD_TO_SQLITE.get(
+                    f.base_type.lower(), "TEXT"
+                )
+                parts = [
+                    f"ALTER TABLE"
+                    f" {_quote_identifier(table_name)}",
+                    "ADD COLUMN",
+                    f"{_quote_identifier(f.key)} {sqlite_type}",
+                ]
+                # SQLite ADD COLUMN restrictions: NOT NULL requires a
+                # DEFAULT; UNIQUE / FK with non-NULL default is
+                # forbidden. We render DEFAULT and only attach
+                # NOT NULL when a default is also given.
+                if f.default is not None:
+                    parts.append(
+                        f"DEFAULT {_quote_default(f.default)}"
+                    )
+                if not f.optional and f.default is not None:
+                    parts.append("NOT NULL")
+                self._conn.execute(" ".join(parts))
+                added.append(f.key)
+        self._schema = SchemaInspector(self._conn)
+        skipped = [
+            f.key for f in scalar_fields if f.key in existing_cols
+        ]
+        result: dict[str, Any] = {
+            "table": table_name,
+            "altered": bool(added),
+            "added": added,
+        }
+        if skipped:
+            result["skipped"] = skipped
+        if any_constraint_section:
+            # Constraint changes on existing tables need a rebuild,
+            # which is Slice F. Surface this loud-and-clear.
+            result["constraint-changes-skipped"] = True
+        return serialize(result, label="Result")
+
+    def _render_column_def(
+        self, f: SchemaField, use_table_level_pk: bool
+    ) -> str:
+        """Render one column-def fragment for inside CREATE TABLE."""
+        sqlite_type = _JMD_TO_SQLITE.get(f.base_type.lower(), "TEXT")
+        parts = [_quote_identifier(f.key), sqlite_type]
+        # Single-column PK is rendered inline; composite PK takes the
+        # table-level path (caller passes use_table_level_pk).
+        if f.readonly and not use_table_level_pk:
+            parts.append("PRIMARY KEY")
+        if not f.optional:
+            parts.append("NOT NULL")
+        if f.default is not None:
+            parts.append(f"DEFAULT {_quote_default(f.default)}")
+        if f.enum_values:
+            in_list = ", ".join(
+                _quote_default(v) for v in f.enum_values
+            )
+            parts.append(
+                f"CHECK ({_quote_identifier(f.key)} IN ({in_list}))"
+            )
+        return " ".join(parts)
 
     def _delete_schema(self, jmd_source: str) -> str:
         """Drop a table or view from the database.
