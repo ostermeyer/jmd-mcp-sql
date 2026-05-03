@@ -2,6 +2,105 @@
 
 All notable changes to `jmd-mcp-sql` are documented here.
 
+## 0.11.0 — 2026-05-03
+
+### Full SQLite DDL surface via JMD `#!` documents
+
+The schema-mode (`#!`) tool was previously additive-only — it could create a
+table from a column-list document and add new columns, but constraints,
+indexes, triggers, and views were out of reach. 0.11.0 closes that gap.
+
+**Tables — column modifiers and table-level constraints**
+
+* Column-level `DEFAULT` values via `key: type = value`.
+* Enum-as-CHECK via the bare-pipe form `key: a|b|c` — generates a column-
+  level `CHECK (key IN ('a', 'b', 'c'))`.
+* Sub-section constraints under `#! Table`:
+  * `## primary-key[]` — composite primary keys.
+  * `## unique[]` — UNIQUE constraints, single- or multi-column.
+  * `## check[]` — raw CHECK expressions.
+  * `## references[]` — single-column foreign keys, form
+    `local_col: ForeignTable.foreign_col`.
+* `read("#! Table")` round-trips all of the above.
+
+**Indexes — top-level shape and inline form**
+
+* `#! Index` document with `name`, `table`, `columns`, optional `unique`
+  and `where` (partial index). Drop via `delete` with
+  `confirm: drop-index`.
+* Inline `## Index[]` sub-section under `#! Table` creates indexes alongside
+  the table; on inline-index failure the whole operation rolls back so
+  table-with-indexes stays all-or-nothing.
+* `read("#! Database")` lists user indexes alongside tables.
+
+**Triggers — top-level shape and inline form**
+
+* `#! Trigger` document with `name`, `table`, `when` (BEFORE / AFTER /
+  INSTEAD OF), `event` (INSERT / UPDATE [OF cols] / DELETE), optional
+  `condition` (WHEN clause), and multi-line `body` (JMD JSON-escape form).
+  Drop via `delete` with `confirm: drop-trigger`.
+* Inline `## Trigger[]` sub-section, same atomic create-or-rollback as
+  inline indexes.
+* `read("#! Database")` lists user triggers.
+
+**Views — top-level shape**
+
+* `#! View` document with `name` and `select` (multi-line bodies via JMD
+  JSON-escape). Drop via `delete` with `confirm: drop-view`. Legacy
+  `confirm: drop-table` path on a view-named label still works.
+* `read("#! Database")` lists user views.
+
+**Virtual tables — `using:` modifier on `#! Table`**
+
+* `using: fts5` (or any other module) turns CREATE TABLE into
+  CREATE VIRTUAL TABLE. Columns render as bare names; `## unindexed[]`
+  flags FTS5 UNINDEXED columns; `## options[]` carries module-arg strings
+  like `"tokenize = 'porter unicode61'"`.
+* Drop via the regular table path.
+
+**`action: rebuild` for non-additive schema changes**
+
+* Frontmatter `action: rebuild` on a write to an existing `#! Table` runs
+  the SQLite table-rebuild dance: stage new schema, copy data over the
+  column intersection, drop old, rename. Inline `## Index[]` and
+  `## Trigger[]` from the rebuild document are recreated post-rename.
+  Without `action: rebuild` the existing additive-only ALTER stands.
+* Atomic via explicit BEGIN IMMEDIATE / COMMIT (with autocommit-mode
+  override of Python sqlite3's legacy isolation handling). On any failure
+  — bad CHECK syntax, existing data violating a new CHECK, malformed FK
+  reference — the original table is left untouched.
+
+**Reserved DDL-object labels**
+
+`Index`, `Trigger`, and `View` now dispatch to the per-kind shape unless
+a real table by that name exists (mirroring the long-standing
+`#! Database` root-schema fallback). If you have a user table called
+`Index`, `Trigger`, or `View`, schema operations on it keep working
+unchanged — those names just take precedence over the DDL-object
+shapes.
+
+### Internal: modular structure under `jmd_mcp_sql/`
+
+0.11.0 also restructures the internal layout. The 3,900-line
+`translator.py` is split into a 124-line public dispatch hull plus
+focused modules:
+
+* `_context.py` — `TranslatorContext` dataclass holding the connection
+  and schema cache, with the universal access patterns
+  (`resolve_or_error`, `fetchall`, `explain`, `refresh_schema`).
+* `_schema_ops.py` — schema-mode operations as free functions over a
+  context.
+* `_query_ops.py` — query-mode operations as free functions.
+* `_data_ops.py` — data-mode reads, writes, and deletes.
+* `_filters.py` — QBE WHERE-clause builders.
+* `_ddl.py`, `_query_parser.py`, `_debug.py`, `_sql.py` — pure-function
+  helper modules.
+
+The public API (`SQLTranslator.read` / `.write` / `.delete` plus the
+`main()` entry point) is unchanged. Anyone reaching into private names
+(`_build_where`, the internal mixin classes that briefly existed during
+the restructure) will need to update; everyone else is unaffected.
+
 ## 0.10.0 — 2026-04-23
 
 ### License change: AGPL-3.0 → Apache 2.0

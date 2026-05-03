@@ -204,47 +204,53 @@ def open_database(document: str) -> str:
 
 @mcp.tool()
 def read(document: str) -> str:
-    """Read records or table schema using a JMD document (https://github.com/ostermeyer/jmd-spec).
+    """Read records or schema via a JMD document (https://github.com/ostermeyer/jmd-spec).
 
-    Data document (# Label): look up records by exact field values.
-    Returns a single record if exactly one matches, a list otherwise.
+    Data (# Label): exact-match lookup.
 
         # Order
         id: 42
 
-    Query-by-Example document (#? Label): filter records by field
-    values.  Omitted fields match any value.  Always returns a list.
+    Query (#? Label): QBE filter; optional pagination, projection,
+    aggregation, and JOIN.
 
         #? Order
         status: pending
 
-    Schema document (#! Label): describe the table structure.
-    Returns a #! document with column names, types, and modifiers.
-    Use ``read("#! Database")`` to list all tables.
+    Schema (#! Label): describe the table — columns, types,
+    modifiers, and any sub-section constraints.
 
         #! Order
 
-    QBE filter operators (in #? bodies):
-      =   equality (default when no operator)
+    Reserved DDL-object labels (dispatch to per-kind shape unless a
+    real table by that name exists):
+
+        #! Database              list tables, indexes, triggers, views
+        #! Index / name: foo     index: table, columns, unique, where
+        #! Trigger / name: foo   trigger: when, event, condition, body
+        #! View / name: foo      view: select
+
+    QBE operators in #? bodies:
+      =   equality (default)
       >   greater than       >=  greater or equal
       <   less than          <=  less or equal
-      |   alternation (OR) e.g. 'Germany|France'
-      ~   substring (case-insensitive) e.g. '~Corp'
+      |   alternation (OR), e.g. 'Germany|France'
+      ~   substring (case-insensitive), e.g. '~Corp'
       ^   regex (implicit full-match anchoring)
       !   negation, composable with any operator
 
-    Frontmatter keys (before the heading):
+    Frontmatter keys:
       page-size, page      pagination
-      count                return count only, no rows
+      count                return only the row count
       select               projection (comma-separated columns)
       join                 cross-table JOIN, e.g. 'Table on Col'
       sum, avg, min, max   aggregations with optional 'as alias'
       group, having, sort  GROUP BY / HAVING / ORDER BY
 
     Frontmatter policy: observable tolerance — unknown keys are
-    echoed in the response as 'ignored-keys: ...'.
-    Debug frontmatter: 'debug: sql, timing, table, plan, filters,
-    resolved, coercions' (composable, or 'debug: true' for all).
+    echoed back as 'ignored-keys: …'.
+    Debug: 'debug: sql, timing, table, plan, filters, resolved,
+    coercions' (composable; 'debug: true' enables all).
     """
     try:
         return _t().read(document)
@@ -257,18 +263,16 @@ def read(document: str) -> str:
 
 @mcp.tool()
 def write(document: str) -> str:
-    """Write a record or define a table schema using a JMD document (https://github.com/ostermeyer/jmd-spec).
+    r"""Write a record or define a DDL object (https://github.com/ostermeyer/jmd-spec).
 
-    Data document (# Label): insert or replace a record.
-    If a record with the same primary key exists, it is replaced.
-    Returns the written record as confirmed by the database.
+    Data (# Label): INSERT OR REPLACE one record.
 
         # Order
         id: 42
         status: shipped
         total: 149.99
 
-    Bulk insert (# Label[]): insert multiple records at once.
+    Bulk insert (# Label[]):
 
         # Order[]
         - id: 42
@@ -276,23 +280,72 @@ def write(document: str) -> str:
         - id: 43
           status: pending
 
-    Schema document (#! Label): create or extend a table.
-    If the table does not exist, it is created. If it exists, new
-    columns are added. Existing columns are never modified or
-    removed (the response carries 'skipped[]' listing ignored
-    changes).  Types: integer, float, string, boolean (stored as
-    integer in SQLite).  Modifiers: 'readonly' (primary key),
-    'optional' (nullable).
+    Schema (#! Label): full SQLite DDL surface.
+
+    Per-column types: integer, float, string, boolean (int in SQLite).
+    Per-column modifiers:
+      readonly         primary key (single-col); do not supply on insert
+      optional         NULL allowed
+      = <expr>         DEFAULT value (number, string, CURRENT_TIMESTAMP)
+      a|b|c            enum form — generates a CHECK (col IN (…))
 
         #! Order
         id: integer readonly
-        status: string
-        total: float optional
+        status: pending|shipped|cancelled
+        total: float = 0
+        customer_id: integer
 
-    Frontmatter policy: observable tolerance — unknown keys are
-    echoed in the response as 'ignored-keys: ...'.
-    Debug frontmatter: 'debug: sql, timing, table' (composable,
-    or 'debug: true' for all).
+    Table-level constraints as sub-sections:
+      ## primary-key[]   composite PK (column names)
+      ## unique[]        UNIQUE constraints (each entry one or more cols)
+      ## check[]         raw CHECK expressions
+      ## references[]    single-col FKs in form 'local: Table.foreign'
+
+    Inline DDL objects under #! Table (created atomically with the table):
+      ## Index[]    name, columns, optional unique / where
+      ## Trigger[]  name, when, event, body, optional condition
+
+    Top-level DDL-object documents:
+
+        #! Index
+        name: idx_order_status
+        table: Order
+        columns: status
+        unique: false
+        where: deleted_at IS NULL
+
+        #! Trigger
+        name: trg_log_orders
+        table: Order
+        when: AFTER          # BEFORE | AFTER | INSTEAD OF
+        event: INSERT        # INSERT | UPDATE [OF cols] | DELETE
+        condition: NEW.status = 'pending'
+        body: "INSERT INTO Log(msg) VALUES ('x');"
+
+        #! View
+        name: PendingOrders
+        select: "SELECT id FROM \\\"Order\\\" WHERE status='pending'"
+
+    Virtual tables — `using: <module>` modifier on #! Table:
+
+        #! Notes
+        using: fts5
+        title: string
+        body: string
+        ## unindexed[]
+        - memory_id
+        ## options[]
+        - "tokenize = 'porter unicode61'"
+
+    Existing tables: writes are additive — only new columns are added.
+    Constraint or column-type changes need 'action: rebuild' frontmatter,
+    which runs the SQLite table-rebuild dance atomically (data preserved
+    over the column intersection; pre-existing dependent indexes and
+    triggers must be redeclared inline in the rebuild document).
+
+    Frontmatter policy: observable tolerance.
+    Frontmatter keys: action (= 'rebuild'), debug.
+    Debug: 'debug: sql, timing, table'.
     """
     try:
         return _t().write(document)
@@ -305,33 +358,49 @@ def write(document: str) -> str:
 
 @mcp.tool()
 def delete(document: str) -> str:
-    """Delete records or drop a table using a JMD document (https://github.com/ostermeyer/jmd-spec).
+    """Delete records or drop a DDL object (https://github.com/ostermeyer/jmd-spec).
 
-    Delete document (#- Label): delete matching records.
-    All fields act as filters. At least one field is required.
-    Returns the deleted record as confirmation.
+    Delete (#- Label): filter-based delete (≥1 field required).
 
         #- Order
         id: 42
 
-    Bulk delete (#- Label[]): delete by primary-key list.
-    Use after a #? read to verify the target set.
+    Bulk delete (#- Label[]): primary-key list (or objects for
+    composite keys).
 
         #- Order[]
         - 42
         - 43
 
-    Schema document (#! Label): drop the entire table.
-    Requires ``confirm: drop-table`` in frontmatter.
+    Schema (#! Label): drop a DDL object. Each kind needs its own
+    confirm-key:
 
+      Tables / views (legacy):
         confirm: drop-table
 
         #! Order
 
-    Frontmatter policy: strict refusal — unknown keys cause a
-    structured error.  Accepted keys: confirm, debug.
-    Debug frontmatter: 'debug: sql, timing, table' (composable,
-    or 'debug: true' for all).
+      Indexes:
+        confirm: drop-index
+
+        #! Index
+        name: idx_order_status
+
+      Triggers:
+        confirm: drop-trigger
+
+        #! Trigger
+        name: trg_log_orders
+
+      Views (preferred over the legacy drop-table path):
+        confirm: drop-view
+
+        #! View
+        name: PendingOrders
+
+    Frontmatter policy: strict refusal — unknown keys cause an error.
+    Accepted keys: confirm, debug.
+    Debug: 'debug: sql, timing, table'.
     """
     try:
         return _t().delete(document)
