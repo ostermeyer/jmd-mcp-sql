@@ -624,6 +624,84 @@ def _index_where_clause(sql: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
+def _build_create_trigger_sql(
+    name: str,
+    table: str,
+    when: str,
+    event: str,
+    condition: str | None,
+    body: str,
+) -> str:
+    """Render a ``CREATE TRIGGER ... BEGIN ... END`` statement.
+
+    SQLite supports BEFORE / AFTER / INSTEAD OF for the timing and
+    INSERT / UPDATE [OF cols] / DELETE for the event. Trigger
+    statements always operate FOR EACH ROW (the only level SQLite
+    supports), so the modifier is emitted unconditionally.
+    """
+    parts = [
+        f"CREATE TRIGGER {_quote_identifier(name)}",
+        when.strip(),
+        event.strip(),
+        f"ON {_quote_identifier(table)}",
+        "FOR EACH ROW",
+    ]
+    if condition:
+        parts.append(f"WHEN {condition}")
+    body_stripped = body.strip()
+    if not body_stripped.endswith(";"):
+        body_stripped = body_stripped + ";"
+    parts.append("BEGIN")
+    parts.append(body_stripped)
+    parts.append("END")
+    return " ".join(parts)
+
+
+_TRIGGER_RE = re.compile(
+    r"^CREATE\s+TRIGGER\s+(?:\"([^\"]+)\"|(\w+))\s+"
+    r"(BEFORE|AFTER|INSTEAD\s+OF)\s+"
+    r"(INSERT|DELETE|UPDATE(?:\s+OF\s+[\w,\s\"]+)?)\s+"
+    r"ON\s+(?:\"([^\"]+)\"|(\w+))\s+"
+    r"(?:FOR\s+EACH\s+ROW\s+)?"
+    r"(?:WHEN\s+(.+?)\s+)?"
+    r"BEGIN\s+(.+?)\s+END\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _parse_trigger_sql(sql: str) -> dict[str, Any] | None:
+    """Parse a stored CREATE TRIGGER SQL into a dict of fields."""
+    m = _TRIGGER_RE.match(sql.strip())
+    if not m:
+        return None
+    name = m.group(1) or m.group(2) or ""
+    when_kw = m.group(3).upper().replace("  ", " ")
+    event = re.sub(r"\s+", " ", m.group(4).strip()).upper()
+    table = m.group(5) or m.group(6) or ""
+    condition = m.group(7).strip() if m.group(7) else None
+    body = m.group(8).strip()
+    return {
+        "name": name,
+        "when": when_kw,
+        "event": event,
+        "table": table,
+        "condition": condition,
+        "body": body,
+    }
+
+
+def _user_triggers(
+    conn: sqlite3.Connection,
+) -> list[tuple[str, str]]:
+    """Return (name, tbl_name) for user-defined triggers."""
+    rows = conn.execute(
+        "SELECT name, tbl_name FROM sqlite_master"
+        " WHERE type='trigger' AND sql IS NOT NULL"
+        " ORDER BY name"
+    ).fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
 def _user_indexes(
     conn: sqlite3.Connection, table_name: str | None = None
 ) -> list[tuple[str, str]]:
@@ -1708,6 +1786,11 @@ class SQLTranslator:
         # Reserved DDL-object labels (Slice B+).
         if label == "Index" and self._schema.resolve("Index") is None:
             return self._read_index_doc(jmd_source)
+        if (
+            label == "Trigger"
+            and self._schema.resolve("Trigger") is None
+        ):
+            return self._read_trigger_doc(jmd_source)
 
         table = self._resolve_or_error(label)
 
@@ -1823,6 +1906,13 @@ class SQLTranslator:
             for idx_name, _tbl in indexes:
                 lines.append(f"- {idx_name}")
 
+        triggers = _user_triggers(self._conn)
+        if triggers:
+            lines.append("")
+            lines.append("## triggers[]")
+            for trg_name, _tbl in triggers:
+                lines.append(f"- {trg_name}")
+
         return "\n".join(lines)
 
     def _write_schema(self, jmd_source: str) -> str:
@@ -1856,6 +1946,11 @@ class SQLTranslator:
             and self._schema.resolve("Index") is None
         ):
             return self._write_index_doc(jmd_source)
+        if (
+            table_name == "Trigger"
+            and self._schema.resolve("Trigger") is None
+        ):
+            return self._write_trigger_doc(jmd_source)
 
         # Sub-section data is only visible through JMDParser; the
         # schema parser leaves ``## name[]`` as empty SchemaObjects.
@@ -1865,6 +1960,7 @@ class SQLTranslator:
         checks_sec = _as_string_list(data.get("check"))
         references_sec = _as_string_list(data.get("references"))
         indexes_sec = data.get("Index", []) or []
+        triggers_sec = data.get("Trigger", []) or []
 
         scalar_fields = [
             f for f in schema.fields if isinstance(f, SchemaField)
@@ -1890,6 +1986,7 @@ class SQLTranslator:
                 checks_sec,
                 references_sec,
                 indexes_sec,
+                triggers_sec,
             )
         return self._alter_table(
             table_name,
@@ -1910,6 +2007,7 @@ class SQLTranslator:
         checks_sec: list[str],
         references_sec: list[str],
         indexes_sec: list[Any],
+        triggers_sec: list[Any],
     ) -> str:
         """Render and execute a fresh CREATE TABLE."""
         # Composite PK is declared at table level; in that case the
@@ -1995,6 +2093,30 @@ class SQLTranslator:
                 return serialize(idx_sql_or_err, label="Error")
             try:
                 self._conn.execute(idx_sql_or_err)
+            except sqlite3.Error as e:
+                self._conn.execute(
+                    f"DROP TABLE {_quote_identifier(table_name)}"
+                )
+                self._conn.commit()
+                return serialize(
+                    {"status": 400, "code": "ddl_failed",
+                     "message": str(e)},
+                    label="Error",
+                )
+        for entry in triggers_sec:
+            if not isinstance(entry, dict):
+                continue
+            trg_sql_or_err = self._build_inline_trigger_sql(
+                entry, table_name
+            )
+            if isinstance(trg_sql_or_err, dict):
+                self._conn.execute(
+                    f"DROP TABLE {_quote_identifier(table_name)}"
+                )
+                self._conn.commit()
+                return serialize(trg_sql_or_err, label="Error")
+            try:
+                self._conn.execute(trg_sql_or_err)
             except sqlite3.Error as e:
                 self._conn.execute(
                     f"DROP TABLE {_quote_identifier(table_name)}"
@@ -2244,6 +2366,182 @@ class SQLTranslator:
             label="Result",
         )
 
+    # ------------------------------------------------------------------
+    # Trigger DDL — top-level ``#! Trigger`` shape (Slice C)
+    # ------------------------------------------------------------------
+
+    def _build_inline_trigger_sql(
+        self, entry: dict[str, Any], table_name: str
+    ) -> str | dict[str, Any]:
+        """Render one ``## Trigger[]`` entry into a CREATE TRIGGER SQL.
+
+        The enclosing ``#! Table`` supplies a default ``table:`` so
+        inline triggers usually omit it; an explicit override is
+        accepted.
+        """
+        name = entry.get("name")
+        when = entry.get("when")
+        event = entry.get("event")
+        body = entry.get("body")
+        if not name or not when or not event or not body:
+            return {
+                "status": 400, "code": "bad_request",
+                "message": (
+                    "## Trigger[] entry requires"
+                    " name, when, event, body"
+                ),
+            }
+        condition = entry.get("condition")
+        target = str(entry.get("table") or table_name)
+        return _build_create_trigger_sql(
+            str(name),
+            target,
+            str(when),
+            str(event),
+            str(condition) if condition else None,
+            str(body),
+        )
+
+    def _write_trigger_doc(self, jmd_source: str) -> str:
+        """Handle ``write('#! Trigger ...')`` — create one trigger."""
+        data = JMDParser().parse(jmd_source)
+        name = data.get("name")
+        table = data.get("table")
+        when = data.get("when")
+        event = data.get("event")
+        body = data.get("body")
+        if (
+            not name or not table or not when
+            or not event or not body
+        ):
+            return serialize(
+                {"status": 400, "code": "bad_request",
+                 "message": (
+                     "#! Trigger requires name, table,"
+                     " when, event, body"
+                 )},
+                label="Error",
+            )
+        condition = data.get("condition")
+        sql = _build_create_trigger_sql(
+            str(name),
+            str(table),
+            str(when),
+            str(event),
+            str(condition) if condition else None,
+            str(body),
+        )
+        try:
+            self._conn.execute(sql)
+            self._conn.commit()
+        except sqlite3.Error as e:
+            return serialize(
+                {"status": 400, "code": "ddl_failed",
+                 "message": str(e)},
+                label="Error",
+            )
+        self._schema = SchemaInspector(self._conn)
+        return serialize(
+            {"trigger": str(name), "table": str(table),
+             "created": True},
+            label="Result",
+        )
+
+    def _read_trigger_doc(self, jmd_source: str) -> str:
+        """Handle ``read('#! Trigger ...')`` — return one trigger's schema."""
+        data = JMDParser().parse(jmd_source)
+        name = data.get("name")
+        if not name:
+            return serialize(
+                {"status": 400, "code": "bad_request",
+                 "message": (
+                     "#! Trigger read requires 'name' field"
+                 )},
+                label="Error",
+            )
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master"
+            " WHERE type='trigger' AND name=?",
+            (str(name),),
+        ).fetchone()
+        if not row or not row[0]:
+            return serialize(
+                {"status": 404, "code": "not_found",
+                 "message": f"Trigger '{name}' does not exist"},
+                label="Error",
+            )
+        parsed = _parse_trigger_sql(row[0])
+        if parsed is None:
+            return serialize(
+                {"status": 500, "code": "parse_failed",
+                 "message": (
+                     "could not parse stored trigger SQL"
+                 )},
+                label="Error",
+            )
+        lines = [
+            "#! Trigger",
+            f"name: {parsed['name']}",
+            f"table: {parsed['table']}",
+            f"when: {parsed['when']}",
+            f"event: {parsed['event']}",
+        ]
+        if parsed["condition"]:
+            lines.append(f"condition: {parsed['condition']}")
+        # Body is multi-line; use JMD JSON-escape form.
+        body_escaped = (
+            parsed["body"]
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+        )
+        lines.append(f'body: "{body_escaped}"')
+        return "\n".join(lines)
+
+    def _delete_trigger_doc(
+        self, jmd_source: str, fm: dict[str, Any]
+    ) -> str:
+        """Handle ``delete('#! Trigger ...')`` — drop one trigger."""
+        if fm.get("confirm") != "drop-trigger":
+            return serialize(
+                {"status": 400, "code": "confirmation_required",
+                 "message": (
+                     "Dropping a trigger requires"
+                     " 'confirm: drop-trigger' in the frontmatter"
+                 )},
+                label="Error",
+            )
+        data = JMDParser().parse(jmd_source)
+        name = data.get("name")
+        if not name:
+            return serialize(
+                {"status": 400, "code": "bad_request",
+                 "message": (
+                     "#! Trigger delete requires 'name' field"
+                 )},
+                label="Error",
+            )
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master"
+            " WHERE type='trigger' AND name=?",
+            (str(name),),
+        ).fetchone()
+        if not row:
+            return serialize(
+                {"status": 404, "code": "not_found",
+                 "message": f"Trigger '{name}' does not exist"},
+                label="Error",
+            )
+        self._conn.execute(
+            f"DROP TRIGGER {_quote_identifier(str(name))}"
+        )
+        self._conn.commit()
+        self._schema = SchemaInspector(self._conn)
+        return serialize(
+            {"trigger": str(name), "dropped": True},
+            label="Result",
+        )
+
     def _delete_schema(self, jmd_source: str) -> str:
         """Drop a table, view, or other DDL object.
 
@@ -2260,6 +2558,11 @@ class SQLTranslator:
         label = self._label_from_source(jmd_source)
         if label == "Index" and self._schema.resolve("Index") is None:
             return self._delete_index_doc(jmd_source, fm)
+        if (
+            label == "Trigger"
+            and self._schema.resolve("Trigger") is None
+        ):
+            return self._delete_trigger_doc(jmd_source, fm)
 
         if fm.get("confirm") != "drop-table":
             return serialize(
