@@ -856,7 +856,7 @@ _KNOWN_FM_READ_QUERY: frozenset[str] = frozenset({
     "select", "join", "sum", "avg", "min", "max", "count",
     "group", "having", "sort", "page-size", "page", "debug",
 })
-_KNOWN_FM_WRITE: frozenset[str] = frozenset({"debug"})
+_KNOWN_FM_WRITE: frozenset[str] = frozenset({"debug", "action"})
 _KNOWN_FM_DELETE: frozenset[str] = frozenset({
     "confirm", "debug",
 })
@@ -2112,6 +2112,26 @@ class SQLTranslator:
                 indexes_sec,
                 triggers_sec,
             )
+        # Frontmatter ``action: rebuild`` → SQLite table-rebuild
+        # dance: stage new schema, copy data, swap. Without it we
+        # only do additive ALTER (existing behaviour). The data
+        # parser above lost its frontmatter view by parsing again;
+        # re-extract from source.
+        fm_parser = JMDParser()
+        fm_parser.parse(jmd_source)
+        fm = fm_parser.frontmatter
+        if fm.get("action") == "rebuild":
+            return self._rebuild_table(
+                table_name,
+                existing,
+                scalar_fields,
+                primary_keys_sec,
+                uniques_sec,
+                checks_sec,
+                references_sec,
+                indexes_sec,
+                triggers_sec,
+            )
         return self._alter_table(
             table_name,
             existing,
@@ -2122,7 +2142,7 @@ class SQLTranslator:
             ),
         )
 
-    def _create_table(
+    def _render_create_table_sql(
         self,
         table_name: str,
         scalar_fields: list[SchemaField],
@@ -2130,12 +2150,13 @@ class SQLTranslator:
         uniques_sec: list[str],
         checks_sec: list[str],
         references_sec: list[str],
-        indexes_sec: list[Any],
-        triggers_sec: list[Any],
-    ) -> str:
-        """Render and execute a fresh CREATE TABLE."""
-        # Composite PK is declared at table level; in that case the
-        # individual column defs do *not* emit ``PRIMARY KEY`` inline.
+    ) -> str | dict[str, Any]:
+        """Build the CREATE TABLE SQL string (no execute).
+
+        Returns a SQL string on success or an error-payload dict
+        (status / code / message) on validation failure (e.g. a
+        malformed ``## references[]`` entry).
+        """
         composite_pk_cols: list[str] = []
         for entry in primary_keys_sec:
             composite_pk_cols.extend(_split_columns(entry))
@@ -2170,14 +2191,13 @@ class SQLTranslator:
         for r in references_sec:
             fk = _parse_reference(r)
             if fk is None:
-                return serialize(
-                    {"status": 400, "code": "bad_request",
-                     "message": (
-                         f"references entry {r!r} not in form"
-                         " 'local_col: Table.foreign_col'"
-                     )},
-                    label="Error",
-                )
+                return {
+                    "status": 400, "code": "bad_request",
+                    "message": (
+                        f"references entry {r!r} not in form"
+                        " 'local_col: Table.foreign_col'"
+                    ),
+                }
             local, ftab, fcol = fk
             constraints.append(
                 f"FOREIGN KEY ({_quote_identifier(local)}) "
@@ -2186,10 +2206,30 @@ class SQLTranslator:
             )
 
         body_sql = ", ".join(col_defs + constraints)
-        sql = (
+        return (
             f"CREATE TABLE {_quote_identifier(table_name)}"
             f" ({body_sql})"
         )
+
+    def _create_table(
+        self,
+        table_name: str,
+        scalar_fields: list[SchemaField],
+        primary_keys_sec: list[str],
+        uniques_sec: list[str],
+        checks_sec: list[str],
+        references_sec: list[str],
+        indexes_sec: list[Any],
+        triggers_sec: list[Any],
+    ) -> str:
+        """Render and execute a fresh CREATE TABLE."""
+        sql_or_err = self._render_create_table_sql(
+            table_name, scalar_fields, primary_keys_sec,
+            uniques_sec, checks_sec, references_sec,
+        )
+        if isinstance(sql_or_err, dict):
+            return serialize(sql_or_err, label="Error")
+        sql = sql_or_err
         try:
             self._conn.execute(sql)
         except sqlite3.Error as e:
@@ -2384,6 +2424,131 @@ class SQLTranslator:
             # Constraint changes on existing tables need a rebuild,
             # which is Slice F. Surface this loud-and-clear.
             result["constraint-changes-skipped"] = True
+        return serialize(result, label="Result")
+
+    def _rebuild_table(
+        self,
+        table_name: str,
+        existing: TableInfo,
+        scalar_fields: list[SchemaField],
+        primary_keys_sec: list[str],
+        uniques_sec: list[str],
+        checks_sec: list[str],
+        references_sec: list[str],
+        indexes_sec: list[Any],
+        triggers_sec: list[Any],
+    ) -> str:
+        """SQLite table-rebuild dance for non-additive schema changes.
+
+        1. Build CREATE TABLE for a staging name with the new schema.
+        2. INSERT INTO staging SELECT FROM old, copying only columns
+           that exist on both sides (added columns get DEFAULT/NULL,
+           dropped columns lose their data).
+        3. Drop the old table; rename staging to its name.
+        4. Recreate inline ## Index[] / ## Trigger[] entries.
+
+        Atomic: the whole sequence runs inside one explicit BEGIN/
+        COMMIT (or ROLLBACK on any failure). Pre-existing indexes
+        and triggers on the table are dropped along with the table
+        and must be redeclared in the rebuild document.
+        """
+        staging_name = f"{table_name}__rebuild"
+        sql_or_err = self._render_create_table_sql(
+            staging_name, scalar_fields, primary_keys_sec,
+            uniques_sec, checks_sec, references_sec,
+        )
+        if isinstance(sql_or_err, dict):
+            return serialize(sql_or_err, label="Error")
+        create_staging_sql = sql_or_err
+
+        # Common columns: copy what survives the schema change.
+        old_col_names = {c.name for c in existing.columns}
+        new_col_names = {f.key for f in scalar_fields}
+        common = [
+            f.key for f in scalar_fields if f.key in old_col_names
+        ]
+        common_q = ", ".join(_quote_identifier(c) for c in common)
+        if common:
+            insert_sql = (
+                f"INSERT INTO {_quote_identifier(staging_name)}"
+                f" ({common_q})"
+                f" SELECT {common_q}"
+                f" FROM {_quote_identifier(table_name)}"
+            )
+        else:
+            insert_sql = None
+
+        # Switch to autocommit so we drive the transaction by hand.
+        # SQLite supports DDL inside transactions; the legacy Python
+        # sqlite3 isolation modes implicit-commit on DDL otherwise.
+        old_iso = self._conn.isolation_level
+        self._conn.isolation_level = None
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                # Defensive: drop any leftover staging table from a
+                # previous failed rebuild attempt.
+                self._conn.execute(
+                    f"DROP TABLE IF EXISTS"
+                    f" {_quote_identifier(staging_name)}"
+                )
+                self._conn.execute(create_staging_sql)
+                if insert_sql is not None:
+                    self._conn.execute(insert_sql)
+                self._conn.execute(
+                    f"DROP TABLE"
+                    f" {_quote_identifier(table_name)}"
+                )
+                self._conn.execute(
+                    f"ALTER TABLE"
+                    f" {_quote_identifier(staging_name)}"
+                    f" RENAME TO {_quote_identifier(table_name)}"
+                )
+                # Inline indexes & triggers from the rebuild doc.
+                for entry in indexes_sec:
+                    if not isinstance(entry, dict):
+                        continue
+                    idx = self._build_inline_index_sql(
+                        entry, table_name
+                    )
+                    if isinstance(idx, dict):
+                        raise sqlite3.Error(
+                            str(idx.get("message", ""))
+                        )
+                    self._conn.execute(idx)
+                for entry in triggers_sec:
+                    if not isinstance(entry, dict):
+                        continue
+                    trg = self._build_inline_trigger_sql(
+                        entry, table_name
+                    )
+                    if isinstance(trg, dict):
+                        raise sqlite3.Error(
+                            str(trg.get("message", ""))
+                        )
+                    self._conn.execute(trg)
+                self._conn.execute("COMMIT")
+            except sqlite3.Error as e:
+                self._conn.execute("ROLLBACK")
+                return serialize(
+                    {"status": 400, "code": "rebuild_failed",
+                     "message": str(e)},
+                    label="Error",
+                )
+        finally:
+            self._conn.isolation_level = old_iso
+
+        self._schema = SchemaInspector(self._conn)
+        added = sorted(new_col_names - old_col_names)
+        dropped = sorted(old_col_names - new_col_names)
+        result: dict[str, Any] = {
+            "table": table_name,
+            "rebuilt": True,
+        }
+        if added:
+            result["added"] = added
+        if dropped:
+            result["dropped"] = dropped
         return serialize(result, label="Result")
 
     def _render_column_def(
