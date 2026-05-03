@@ -702,6 +702,28 @@ def _user_triggers(
     return [(r[0], r[1]) for r in rows]
 
 
+def _user_views(conn: sqlite3.Connection) -> list[str]:
+    """Return user view names from sqlite_master."""
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master"
+        " WHERE type='view' AND name NOT LIKE 'sqlite_%'"
+        " ORDER BY name"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+_VIEW_RE = re.compile(
+    r"^CREATE\s+VIEW\s+(?:\"([^\"]+)\"|(\w+))\s+AS\s+(.+?)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _parse_view_select(sql: str) -> str | None:
+    """Pull the SELECT body out of a stored CREATE VIEW statement."""
+    m = _VIEW_RE.match(sql.strip())
+    return m.group(3).strip() if m else None
+
+
 def _user_indexes(
     conn: sqlite3.Connection, table_name: str | None = None
 ) -> list[tuple[str, str]]:
@@ -1791,6 +1813,8 @@ class SQLTranslator:
             and self._schema.resolve("Trigger") is None
         ):
             return self._read_trigger_doc(jmd_source)
+        if label == "View" and self._schema.resolve("View") is None:
+            return self._read_view_doc(jmd_source)
 
         table = self._resolve_or_error(label)
 
@@ -1913,6 +1937,13 @@ class SQLTranslator:
             for trg_name, _tbl in triggers:
                 lines.append(f"- {trg_name}")
 
+        views = _user_views(self._conn)
+        if views:
+            lines.append("")
+            lines.append("## views[]")
+            for v_name in views:
+                lines.append(f"- {v_name}")
+
         return "\n".join(lines)
 
     def _write_schema(self, jmd_source: str) -> str:
@@ -1951,6 +1982,11 @@ class SQLTranslator:
             and self._schema.resolve("Trigger") is None
         ):
             return self._write_trigger_doc(jmd_source)
+        if (
+            table_name == "View"
+            and self._schema.resolve("View") is None
+        ):
+            return self._write_view_doc(jmd_source)
 
         # Sub-section data is only visible through JMDParser; the
         # schema parser leaves ``## name[]`` as empty SchemaObjects.
@@ -2542,6 +2578,126 @@ class SQLTranslator:
             label="Result",
         )
 
+    # ------------------------------------------------------------------
+    # View DDL — top-level ``#! View`` shape (Slice D)
+    # ------------------------------------------------------------------
+
+    def _write_view_doc(self, jmd_source: str) -> str:
+        """Handle ``write('#! View ...')`` — create one view."""
+        data = JMDParser().parse(jmd_source)
+        name = data.get("name")
+        select = data.get("select")
+        if not name or not select:
+            return serialize(
+                {"status": 400, "code": "bad_request",
+                 "message": "#! View requires name and select"},
+                label="Error",
+            )
+        sql = (
+            f"CREATE VIEW {_quote_identifier(str(name))}"
+            f" AS {select}"
+        )
+        try:
+            self._conn.execute(sql)
+            self._conn.commit()
+        except sqlite3.Error as e:
+            return serialize(
+                {"status": 400, "code": "ddl_failed",
+                 "message": str(e)},
+                label="Error",
+            )
+        self._schema = SchemaInspector(self._conn)
+        return serialize(
+            {"view": str(name), "created": True},
+            label="Result",
+        )
+
+    def _read_view_doc(self, jmd_source: str) -> str:
+        """Handle ``read('#! View ...')`` — return one view's schema."""
+        data = JMDParser().parse(jmd_source)
+        name = data.get("name")
+        if not name:
+            return serialize(
+                {"status": 400, "code": "bad_request",
+                 "message": "#! View read requires 'name' field"},
+                label="Error",
+            )
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master"
+            " WHERE type='view' AND name=?",
+            (str(name),),
+        ).fetchone()
+        if not row or not row[0]:
+            return serialize(
+                {"status": 404, "code": "not_found",
+                 "message": f"View '{name}' does not exist"},
+                label="Error",
+            )
+        select_body = _parse_view_select(row[0])
+        if select_body is None:
+            return serialize(
+                {"status": 500, "code": "parse_failed",
+                 "message": (
+                     "could not parse stored view SQL"
+                 )},
+                label="Error",
+            )
+        # Multi-line bodies survive via JMD JSON-escape.
+        select_escaped = (
+            select_body
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+        )
+        lines = [
+            "#! View",
+            f"name: {name}",
+            f'select: "{select_escaped}"',
+        ]
+        return "\n".join(lines)
+
+    def _delete_view_doc(
+        self, jmd_source: str, fm: dict[str, Any]
+    ) -> str:
+        """Handle ``delete('#! View ...')`` — drop one view."""
+        if fm.get("confirm") != "drop-view":
+            return serialize(
+                {"status": 400, "code": "confirmation_required",
+                 "message": (
+                     "Dropping a view requires"
+                     " 'confirm: drop-view' in the frontmatter"
+                 )},
+                label="Error",
+            )
+        data = JMDParser().parse(jmd_source)
+        name = data.get("name")
+        if not name:
+            return serialize(
+                {"status": 400, "code": "bad_request",
+                 "message": "#! View delete requires 'name' field"},
+                label="Error",
+            )
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master"
+            " WHERE type='view' AND name=?",
+            (str(name),),
+        ).fetchone()
+        if not row:
+            return serialize(
+                {"status": 404, "code": "not_found",
+                 "message": f"View '{name}' does not exist"},
+                label="Error",
+            )
+        self._conn.execute(
+            f"DROP VIEW {_quote_identifier(str(name))}"
+        )
+        self._conn.commit()
+        self._schema = SchemaInspector(self._conn)
+        return serialize(
+            {"view": str(name), "dropped": True},
+            label="Result",
+        )
+
     def _delete_schema(self, jmd_source: str) -> str:
         """Drop a table, view, or other DDL object.
 
@@ -2563,6 +2719,8 @@ class SQLTranslator:
             and self._schema.resolve("Trigger") is None
         ):
             return self._delete_trigger_doc(jmd_source, fm)
+        if label == "View" and self._schema.resolve("View") is None:
+            return self._delete_view_doc(jmd_source, fm)
 
         if fm.get("confirm") != "drop-table":
             return serialize(
