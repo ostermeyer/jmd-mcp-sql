@@ -702,6 +702,81 @@ def _user_triggers(
     return [(r[0], r[1]) for r in rows]
 
 
+def _build_create_virtual_table_sql(
+    table_name: str,
+    module: str,
+    columns: list[str],
+    unindexed: set[str],
+    options: list[str],
+) -> str:
+    """Render ``CREATE VIRTUAL TABLE name USING module(args)``.
+
+    Args inside the module's parentheses are columns (with optional
+    ``UNINDEXED`` flag for FTS5) followed by raw module-option
+    strings (``tokenize = 'porter unicode61'`` etc.). Columns are
+    rendered without types — FTS5 doesn't carry types, and other
+    modules either ignore or accept bare column names.
+    """
+    args: list[str] = []
+    for c in columns:
+        if c in unindexed:
+            args.append(f"{_quote_identifier(c)} UNINDEXED")
+        else:
+            args.append(_quote_identifier(c))
+    args.extend(options)
+    return (
+        f"CREATE VIRTUAL TABLE {_quote_identifier(table_name)}"
+        f" USING {module}({', '.join(args)})"
+    )
+
+
+_VIRTUAL_TABLE_RE = re.compile(
+    r"^\s*CREATE\s+VIRTUAL\s+TABLE\s+(?:\"[^\"]+\"|\w+)"
+    r"\s+USING\s+(\w+)\s*\((.*)\)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _is_virtual_table_sql(create_sql: str) -> bool:
+    """True if the stored DDL declares a CREATE VIRTUAL TABLE."""
+    return bool(
+        re.match(
+            r"^\s*CREATE\s+VIRTUAL\s+TABLE",
+            create_sql or "",
+            re.IGNORECASE,
+        )
+    )
+
+
+def _parse_virtual_table(
+    create_sql: str,
+) -> tuple[str, list[str]] | None:
+    """Return ``(module_name, comma-split args)`` from a virtual DDL."""
+    m = _VIRTUAL_TABLE_RE.match(create_sql.strip())
+    if not m:
+        return None
+    return m.group(1), _split_top_level(m.group(2))
+
+
+def _is_unindexed_arg(arg: str) -> tuple[str, bool] | None:
+    """Classify a virtual-table arg as a column declaration.
+
+    Returns (column_name, is_unindexed) for column args, None if
+    the arg looks like a module option (contains ``=``).
+    """
+    if "=" in arg:
+        return None
+    s = arg.strip()
+    unindexed = False
+    if re.search(r"\bUNINDEXED\b", s, re.IGNORECASE):
+        s = re.sub(r"\s*UNINDEXED\s*", "", s, flags=re.IGNORECASE)
+        unindexed = True
+    s = s.strip()
+    if s.startswith('"') and s.endswith('"'):
+        s = s[1:-1]
+    return s, unindexed
+
+
 def _user_views(conn: sqlite3.Connection) -> list[str]:
     """Return user view names from sqlite_master."""
     rows = conn.execute(
@@ -1827,6 +1902,8 @@ class SQLTranslator:
             (table.name,),
         ).fetchone()
         create_sql = row[0] if row else ""
+        if _is_virtual_table_sql(create_sql):
+            return self._read_virtual_table(label, table, create_sql)
         body = _extract_create_table_body(create_sql)
         parts = _split_top_level(body) if body else []
         column_part_by_name: dict[str, str] = {}
@@ -1997,6 +2074,9 @@ class SQLTranslator:
         references_sec = _as_string_list(data.get("references"))
         indexes_sec = data.get("Index", []) or []
         triggers_sec = data.get("Trigger", []) or []
+        using_module = data.get("using")
+        unindexed_sec = _as_string_list(data.get("unindexed"))
+        options_sec = _as_string_list(data.get("options"))
 
         scalar_fields = [
             f for f in schema.fields if isinstance(f, SchemaField)
@@ -2013,6 +2093,14 @@ class SQLTranslator:
                 label="Error",
             )
 
+        if existing is None and using_module:
+            return self._create_virtual_table(
+                table_name,
+                str(using_module),
+                scalar_fields,
+                unindexed_sec,
+                options_sec,
+            )
         if existing is None:
             return self._create_table(
                 table_name,
@@ -2167,6 +2255,83 @@ class SQLTranslator:
         self._schema = SchemaInspector(self._conn)
         return serialize(
             {"table": table_name, "created": True}, label="Result"
+        )
+
+    def _read_virtual_table(
+        self,
+        label: str,
+        table: TableInfo,
+        create_sql: str,
+    ) -> str:
+        """Render the read-back form of a CREATE VIRTUAL TABLE.
+
+        Format mirrors the write input:
+            using: <module>
+            <col>: string
+            ...
+            ## unindexed[]
+            - <col>
+            ## options[]
+            - <key = value>
+        """
+        parsed = _parse_virtual_table(create_sql)
+        if parsed is None:
+            return f"#! {label}"
+        module, args = parsed
+        unindexed: list[str] = []
+        options: list[str] = []
+        for a in args:
+            cls = _is_unindexed_arg(a)
+            if cls is None:
+                # Module option (key = value).
+                options.append(a.strip())
+            else:
+                cname, is_uni = cls
+                if is_uni:
+                    unindexed.append(cname)
+        lines = [f"#! {label}", f"using: {module}"]
+        for col in table.columns:
+            lines.append(f"{col.name}: string")
+        if unindexed:
+            lines.append("")
+            lines.append("## unindexed[]")
+            for u in unindexed:
+                lines.append(f"- {u}")
+        if options:
+            lines.append("")
+            lines.append("## options[]")
+            for o in options:
+                lines.append(f"- \"{o}\"")
+        return "\n".join(lines)
+
+    def _create_virtual_table(
+        self,
+        table_name: str,
+        module: str,
+        scalar_fields: list[SchemaField],
+        unindexed_sec: list[str],
+        options_sec: list[str],
+    ) -> str:
+        """Render and execute a CREATE VIRTUAL TABLE statement."""
+        columns = [f.key for f in scalar_fields]
+        unindexed = {u.strip() for u in unindexed_sec if u.strip()}
+        sql = _build_create_virtual_table_sql(
+            table_name, module, columns, unindexed, options_sec,
+        )
+        try:
+            self._conn.execute(sql)
+            self._conn.commit()
+        except sqlite3.Error as e:
+            return serialize(
+                {"status": 400, "code": "ddl_failed",
+                 "message": str(e)},
+                label="Error",
+            )
+        self._schema = SchemaInspector(self._conn)
+        return serialize(
+            {"table": table_name, "created": True,
+             "virtual": True, "using": module},
+            label="Result",
         )
 
     def _alter_table(
