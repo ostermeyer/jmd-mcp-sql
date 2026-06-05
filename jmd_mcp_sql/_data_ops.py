@@ -72,7 +72,7 @@ def read_data(ctx: TranslatorContext, jmd_source: str) -> str:
     paginated and projection-filtered via ``select:`` frontmatter.
     """
     parser = JMDParser()
-    data = parser.parse(jmd_source)
+    data = parser.parse(jmd_source).value
     fm = parser.frontmatter
     dbg = _parse_debug(fm)
     ignored = _check_frontmatter(
@@ -192,7 +192,7 @@ def read_data(ctx: TranslatorContext, jmd_source: str) -> str:
 def write_data(ctx: TranslatorContext, jmd_source: str) -> str:
     """Execute a ``# Label`` (single) or ``# Label[]`` (bulk) data write."""
     parser = JMDParser()
-    data = parser.parse(jmd_source)
+    data = parser.parse(jmd_source).value
     fm = parser.frontmatter
     dbg = _parse_debug(fm)
     ignored = _check_frontmatter(

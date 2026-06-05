@@ -167,7 +167,7 @@ def open_database(document: str) -> str:
     """
     try:
         parser = JMDParser()
-        parsed: Any = parser.parse(document)
+        parsed: Any = parser.parse(document).value
         ignored = _check_frontmatter(
             parser.frontmatter,
             frozenset({"path"}),

@@ -260,7 +260,7 @@ def _write_schema(ctx: TranslatorContext, jmd_source: str) -> str:
 
     # Sub-section data is only visible through JMDParser; the
     # schema parser leaves ``## name[]`` as empty SchemaObjects.
-    data = JMDParser().parse(jmd_source)
+    data = JMDParser().parse(jmd_source).value
     primary_keys_sec = _as_string_list(data.get("primary-key"))
     uniques_sec = _as_string_list(data.get("unique"))
     checks_sec = _as_string_list(data.get("check"))
@@ -792,7 +792,7 @@ def _build_inline_index_sql(
 
 def _write_index_doc(ctx: TranslatorContext, jmd_source: str) -> str:
     """Handle ``write('#! Index ...')`` — create one index."""
-    data = JMDParser().parse(jmd_source)
+    data = JMDParser().parse(jmd_source).value
     name = data.get("name")
     table = data.get("table")
     cols_raw = data.get("columns", "")
@@ -831,7 +831,7 @@ def _write_index_doc(ctx: TranslatorContext, jmd_source: str) -> str:
 
 def _read_index_doc(ctx: TranslatorContext, jmd_source: str) -> str:
     """Handle ``read('#! Index ...')`` — return one index's schema."""
-    data = JMDParser().parse(jmd_source)
+    data = JMDParser().parse(jmd_source).value
     name = data.get("name")
     if not name:
         return serialize(
@@ -884,7 +884,7 @@ def _delete_index_doc(
              )},
             label="Error",
         )
-    data = JMDParser().parse(jmd_source)
+    data = JMDParser().parse(jmd_source).value
     name = data.get("name")
     if not name:
         return serialize(
@@ -951,7 +951,7 @@ def _build_inline_trigger_sql(
 
 def _write_trigger_doc(ctx: TranslatorContext, jmd_source: str) -> str:
     """Handle ``write('#! Trigger ...')`` — create one trigger."""
-    data = JMDParser().parse(jmd_source)
+    data = JMDParser().parse(jmd_source).value
     name = data.get("name")
     table = data.get("table")
     when = data.get("when")
@@ -996,7 +996,7 @@ def _write_trigger_doc(ctx: TranslatorContext, jmd_source: str) -> str:
 
 def _read_trigger_doc(ctx: TranslatorContext, jmd_source: str) -> str:
     """Handle ``read('#! Trigger ...')`` — return one trigger's schema."""
-    data = JMDParser().parse(jmd_source)
+    data = JMDParser().parse(jmd_source).value
     name = data.get("name")
     if not name:
         return serialize(
@@ -1058,7 +1058,7 @@ def _delete_trigger_doc(
              )},
             label="Error",
         )
-    data = JMDParser().parse(jmd_source)
+    data = JMDParser().parse(jmd_source).value
     name = data.get("name")
     if not name:
         return serialize(
@@ -1095,7 +1095,7 @@ def _delete_trigger_doc(
 
 def _write_view_doc(ctx: TranslatorContext, jmd_source: str) -> str:
     """Handle ``write('#! View ...')`` — create one view."""
-    data = JMDParser().parse(jmd_source)
+    data = JMDParser().parse(jmd_source).value
     name = data.get("name")
     select = data.get("select")
     if not name or not select:
@@ -1125,7 +1125,7 @@ def _write_view_doc(ctx: TranslatorContext, jmd_source: str) -> str:
 
 def _read_view_doc(ctx: TranslatorContext, jmd_source: str) -> str:
     """Handle ``read('#! View ...')`` — return one view's schema."""
-    data = JMDParser().parse(jmd_source)
+    data = JMDParser().parse(jmd_source).value
     name = data.get("name")
     if not name:
         return serialize(
@@ -1179,7 +1179,7 @@ def _delete_view_doc(ctx: TranslatorContext, jmd_source: str, fm: dict[str, Any]
              )},
             label="Error",
         )
-    data = JMDParser().parse(jmd_source)
+    data = JMDParser().parse(jmd_source).value
     name = data.get("name")
     if not name:
         return serialize(

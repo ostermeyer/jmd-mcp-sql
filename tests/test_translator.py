@@ -161,7 +161,7 @@ class TestReadQuery:
     def test_regex_filter(self, nw: SQLTranslator) -> None:
         """Regex filter matches on pattern."""
         result = nw.read(
-            "count: true\n\n#? Products\nProductName: ^Chai"
+            "count: true\n\n#? Products\nProductName: ~re: ^Chai"
         )
         count = int(result.split("count:")[1].split()[0])
         assert count > 0
