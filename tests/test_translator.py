@@ -406,7 +406,7 @@ class TestAggregation:
     """Tests for aggregation frontmatter keys."""
 
     def test_group_count(self, nw: SQLTranslator) -> None:
-        """group + count produces count column per group."""
+        """Group + count produces count column per group."""
         result = nw.read(
             "group: ShipCountry\ncount\n\n#? Orders"
         )
@@ -414,7 +414,7 @@ class TestAggregation:
         assert "count:" in result
 
     def test_group_sum(self, nw: SQLTranslator) -> None:
-        """group + sum produces sum_<field> column."""
+        """Group + sum produces sum_<field> column."""
         result = nw.read(
             "group: ShipCountry\nsum: Freight\npage-size: 5\n\n#? Orders"
         )
@@ -571,7 +571,8 @@ class TestSchemaLifecycle:
     def test_create_table(self, empty: SQLTranslator) -> None:
         """#! write creates a new table."""
         result = empty.write(
-            "#! Widgets\nid: integer readonly\nname: string\nprice: float optional"
+            "#! Widgets\nid: integer readonly\n"
+            "name: string\nprice: float optional"
         )
         assert "created" in result or "Widgets" in result
 
@@ -580,7 +581,8 @@ class TestSchemaLifecycle:
     ) -> None:
         """After creation #! read returns the column schema."""
         empty.write(
-            "#! Widgets\nid: integer readonly\nname: string\nprice: float optional"
+            "#! Widgets\nid: integer readonly\n"
+            "name: string\nprice: float optional"
         )
         schema = empty.read("#! Widgets")
         assert "id: integer readonly" in schema
@@ -593,7 +595,8 @@ class TestSchemaLifecycle:
             "#! Widgets\nid: integer readonly\nname: string"
         )
         empty.write(
-            "#! Widgets\nid: integer readonly\nname: string\ncolor: string optional"
+            "#! Widgets\nid: integer readonly\n"
+            "name: string\ncolor: string optional"
         )
         schema = empty.read("#! Widgets")
         assert "color: string optional" in schema
@@ -672,7 +675,7 @@ class TestDeleteData:
     """Tests for delete-mode documents (#- Label)."""
 
     def test_delete_matching_row(self, nw_rw: SQLTranslator) -> None:
-        """Deleting a row by PK returns the deleted record as a data document."""
+        """Delete by PK returns the deleted record as a data document."""
         nw_rw.write(
             "# Orders\nOrderID: 88888\nShipCountry: Deleteme"
         )
@@ -1133,7 +1136,7 @@ class TestDebugMode:
     def test_debug_on_data_read(
         self, nw: SQLTranslator
     ) -> None:
-        """debug works on data-mode read (# Label)."""
+        """Debug works on data-mode read (# Label)."""
         result = nw.read(
             "debug: sql, table\n\n# Shippers\nShipperID: 1"
         )
